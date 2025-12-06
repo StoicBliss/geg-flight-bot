@@ -39,7 +39,7 @@ PASSENGER_AIRLINES = {
 }
 
 # TNC Waiting Lot Location
-TNC_LOT_MAP_URL = f"http://googleusercontent.com/maps.google.com/7"
+TNC_LOT_MAP_URL = "https://www.google.com/maps/search/?api=1&query=Spokane+International+Airport+Cell+Phone+Waiting+Lot"
 
 # --- FLASK KEEP-ALIVE ---
 app = Flask(__name__)
@@ -163,12 +163,13 @@ def process_data_into_df():
 # --- COMMAND HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "GEG Pro Driver Assistant v6.1\n\n"
+        "GEG Pro Driver Assistant v7.2\n\n"
         "commands:\n"
         "/status - Strategy, Weather & Best Shifts\n"
         "/graph - Demand Chart\n"
         "/arrivals - Pickups (Live)\n"
         "/departures - Drop-offs (Live)\n"
+        "/delays - Check for Delays\n"  # <-- Added Missing Command
         "/navigate - GPS to TNC Lot"
     )
 
@@ -212,15 +213,13 @@ async def driver_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     df = process_data_into_df()
     
     now_spokane = datetime.now(SPOKANE_TZ)
-    now_formatted = now_spokane.strftime('%A, %b %d at %H:%M')
 
     if df.empty: 
-        output = f"### GEG DRIVER STATUS REPORT\n\n"
-        output += f"| METRICS | VALUE |\n| :--- | :--- |\n"
-        output += f"| Current Time | `{now_formatted}` |\n"
-        output += f"| Weather | {weather} |\n"
-        output += f"| **DEMAND LEVEL** | **LOW (NO FLIGHTS)** |\n"
-        output += "\n---\n\n*No upcoming flights found for the next 24 hours.*"
+        output = f"*GEG DRIVER STATUS REPORT*\n\n"
+        output += f"Current Time: *{now_spokane.strftime('%H:%M')}*\n"
+        output += f"Current Weather: {weather}\n"
+        output += f"---"
+        output += f"\n*DEMAND LEVEL*\n*LOW (NO FLIGHTS)*"
         
         keyboard = [[InlineKeyboardButton("Open Waiting Lot GPS", url=TNC_LOT_MAP_URL)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -245,20 +244,19 @@ async def driver_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         best_shift_str = ", ".join([f"{h}:00" for h in top_hours])
     else:
         best_shift_str = "None"
-
-    # 1. Build Metrics Table
-    output = f"### GEG DRIVER STATUS REPORT\n\n"
-    output += f"| METRICS | VALUE |\n| :--- | :--- |\n"
-    output += f"| Current Time | `{now_formatted}` |\n"
-    output += f"| Current Weather | {weather} |\n"
-    output += f"| Next 3-Hour Arrivals | **{arr_count}** Flights |\n"
-    output += f"| **DEMAND LEVEL** | **{msg_clean}** |\n\n"
     
-    # 2. Build Strategy Section
-    output += "---\n\n#### OPTIMAL SHIFT STRATEGY\n\n"
-    output += f"**Best Work Hours:** `{best_shift_str}`\n"
+    # --- V6 CLEAN LAYOUT (FIXED MARKDOWN) ---
+    output = f"*GEG DRIVER STATUS REPORT*\n\n"
+    output += f"Current Time: *{now_spokane.strftime('%H:%M')}*\n"
+    output += f"Current Weather: {weather}\n"
+    output += f"---"
+    output += f"\n*DEMAND FORECAST*"
+    output += f"\nNext 3 Hours: {arr_count} Arrivals"
+    output += f"\nDEMAND LEVEL: *{msg_clean}*"
+    output += f"\n---"
+    output += f"\n*OPTIMAL SHIFT STRATEGY*"
+    output += f"\nBest Work Hours: `{best_shift_str}`"
     
-    # 3. Add Navigation Button
     keyboard = [[InlineKeyboardButton("Open Waiting Lot GPS", url=TNC_LOT_MAP_URL)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -270,9 +268,9 @@ async def check_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
     delays = df[df['status'].isin(['active', 'delayed', 'cancelled'])]
     if delays.empty: return await update.message.reply_text("No delays on upcoming flights.")
     else:
-        msg = "**DELAY REPORT (Pacific Time)**\n"
+        msg = "*DELAY REPORT (Pacific Time)*\n"
         for _, row in delays.iterrows(): 
-            msg += f"{row['time'].strftime('%H:%M')} - **{row['status'].upper()}** ({row['zone']})\n"
+            msg += f"{row['time'].strftime('%H:%M')} - *{row['status'].upper()}* ({row['zone']})\n"
         await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -297,7 +295,7 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
     valid.sort(key=lambda x: x['time'])
     
     title = "Incoming Pickups" if mode == 'arrival' else "Departing Drop-offs"
-    msg = f"**{title}**\n"
+    msg = f"*{title}*\n"
     msg += f"_Current Time: {now_spokane.strftime('%H:%M')}_\n\n"
     
     last_time = None
@@ -320,7 +318,7 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cluster_count = 1 
             
             if cluster_count == 3:
-                 msg += "⚠️ **SURGE CLUSTER DETECTED** ⚠️\n\n"
+                 msg += "⚠️ *SURGE CLUSTER DETECTED* ⚠️\n\n"
 
             last_time = dt
             
@@ -328,11 +326,11 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
             curbside_str = curbside_time.strftime('%H:%M')
             simple_zone = zone_raw.split('(')[0].strip()
             
-            msg += f"**{airline_name}** ({flight_num})\n"
+            msg += f"*{airline_name}* ({flight_num})\n"
             msg += f"Touchdown: `{time_str}` | Ready: `{curbside_str}`\n"
             msg += f"Location: {simple_zone}\n\n"
         else:
-            msg += f"`{time_str}` • **{airline_name}** ({flight_num})\n"
+            msg += f"`{time_str}` • *{airline_name}* ({flight_num})\n"
         
     if not valid:
         msg += "No more flights for today!"
