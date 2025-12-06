@@ -5,27 +5,25 @@ import pandas as pd
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# Read credentials from environment variables
+# --------- Read credentials from environment variables ---------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 OPENSKY_USERNAME = os.environ.get("OPENSKY_USERNAME")
 OPENSKY_PASSWORD = os.environ.get("OPENSKY_PASSWORD")
 
-# Check if credentials exist
 if not all([TELEGRAM_TOKEN, OPENSKY_USERNAME, OPENSKY_PASSWORD]):
     raise ValueError("Please set TELEGRAM_TOKEN, OPENSKY_USERNAME, and OPENSKY_PASSWORD as environment variables.")
 
-# --------- Functions to Fetch & Process Flight Data ---------
-def get_departures():
-    """Fetch departures from GEG airport in the last 24 hours."""
+# --------- Flight Data Functions ---------
+def get_departures(hours_back=24):
+    """Fetch departures from GEG in the past X hours."""
     end_time = int(time.time())
-    begin_time = end_time - 24*3600  # last 24 hours
-    
+    begin_time = end_time - hours_back*3600
     url = f"https://opensky-network.org/api/flights/departure?airport=GEG&begin={begin_time}&end={end_time}"
     try:
         response = requests.get(url, auth=(OPENSKY_USERNAME, OPENSKY_PASSWORD))
         response.raise_for_status()
     except Exception as e:
-        print("Error fetching data from OpenSky:", e)
+        print("Error fetching departures:", e)
         return pd.DataFrame()
     
     data = response.json()
@@ -33,38 +31,102 @@ def get_departures():
         return pd.DataFrame()
     
     df = pd.DataFrame(data)
-    # Convert departure time to local hour
+    df['hour'] = pd.to_datetime(df['firstSeen'], unit='s').dt.hour
+    return df
+
+def get_upcoming_departures(hours_ahead=12):
+    """Fetch upcoming departures from GEG for next X hours."""
+    now = int(time.time())
+    future = now + hours_ahead*3600
+    url = f"https://opensky-network.org/api/flights/departure?airport=GEG&begin={now}&end={future}"
+    try:
+        response = requests.get(url, auth=(OPENSKY_USERNAME, OPENSKY_PASSWORD))
+        response.raise_for_status()
+    except Exception as e:
+        print("Error fetching upcoming departures:", e)
+        return pd.DataFrame()
+    
+    data = response.json()
+    if not data:
+        return pd.DataFrame()
+    
+    df = pd.DataFrame(data)
     df['hour'] = pd.to_datetime(df['firstSeen'], unit='s').dt.hour
     return df
 
 def departures_by_hour(df):
     """Summarize departures by hour."""
     if df.empty:
-        return "No departure data available."
-    
+        return "No data available."
     summary = df.groupby('hour').size().sort_index()
-    message = "🚀 Departures by Hour (last 24h at GEG):\n"
+    message = ""
     for hour, count in summary.items():
         message += f"{hour}:00 - {count} departures\n"
     return message
 
-# --------- Telegram Bot Handlers ---------
+def predict_peak_hours(days=7):
+    """Predict peak departure hours using last X days."""
+    now = int(time.time())
+    begin = now - days*24*3600
+    end = now
+    url = f"https://opensky-network.org/api/flights/departure?airport=GEG&begin={begin}&end={end}"
+    try:
+        response = requests.get(url, auth=(OPENSKY_USERNAME, OPENSKY_PASSWORD))
+        response.raise_for_status()
+    except Exception as e:
+        print("Error fetching historical data:", e)
+        return pd.Series()
+    
+    data = response.json()
+    if not data:
+        return pd.Series()
+    
+    df = pd.DataFrame(data)
+    df['hour'] = pd.to_datetime(df['firstSeen'], unit='s').dt.hour
+    summary = df.groupby('hour').size() / days  # average per hour
+    summary = summary.sort_index()
+    return summary
+
+def format_prediction(summary):
+    if summary.empty:
+        return "No historical data available for prediction."
+    message = "📊 Predicted Peak Hours (Average Departures per Hour):\n"
+    for hour, count in summary.items():
+        message += f"{hour}:00 - {count:.1f} departures\n"
+    return message
+
+# --------- Telegram Handlers ---------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Hi! I'm your GEG Flight Tracker bot.\n"
-        "Use /departures to see flight peaks in the last 24 hours."
+        "Commands:\n"
+        "/departures - Last 24h departures\n"
+        "/upcoming - Next 12h departures\n"
+        "/predict - Predicted peak hours"
     )
 
 async def departures(update: Update, context: ContextTypes.DEFAULT_TYPE):
     df = get_departures()
-    message = departures_by_hour(df)
+    message = "📅 Departures in the last 24 hours at GEG:\n" + departures_by_hour(df)
     await update.message.reply_text(message)
 
-# --------- Run Bot ---------
+async def upcoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    df = get_upcoming_departures()
+    message = "📅 Upcoming departures (next 12 hours at GEG):\n" + departures_by_hour(df)
+    await update.message.reply_text(message)
+
+async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    summary = predict_peak_hours()
+    message = format_prediction(summary)
+    await update.message.reply_text(message)
+
+# --------- Main Bot ---------
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("departures", departures))
+    app.add_handler(CommandHandler("upcoming", upcoming))
+    app.add_handler(CommandHandler("predict", predict))
     
     print("🚀 GEGFlightBot started...")
     app.run_polling()
