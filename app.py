@@ -13,8 +13,8 @@ from flask import Flask, request
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")   # e.g. https://geg-flight-bot.onrender.com/webhook
+BOT_TOKEN = os.getenv("8377026663:AAFA0PHG4VguKwlyborjSjG2GlUCZ1CznGM")
+WEBHOOK_URL = os.getenv("https://geg-flight-bot.onrender.com/webhook")   # e.g. https://geg-flight-bot.onrender.com/webhook
 PORT = int(os.getenv("PORT", 8000))
 
 scheduler = AsyncIOScheduler()
