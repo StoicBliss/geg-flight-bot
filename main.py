@@ -18,6 +18,20 @@ AVIATIONSTACK_API_KEY = os.getenv("AVIATION_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 AIRPORT_IATA = 'GEG'
 
+# --- PASSENGER AIRLINE & TERMINAL LOGIC ---
+# Concourse A/B (South): Delta, United, Southwest, American
+# Concourse C (North): Alaska, American (sometimes), Allegiant
+PASSENGER_AIRLINES = {
+    'AS': 'Zone C (Alaska)', 
+    'G4': 'Zone C (Allegiant)',
+    'DL': 'Zone A/B (Delta)', 
+    'UA': 'Zone A/B (United)', 
+    'WN': 'Zone A/B (Southwest)', 
+    'AA': 'Zone A/B (American)',
+    'F9': 'Zone A/B (Frontier)',
+    'SY': 'Zone A/B (Sun Country)'
+}
+
 # --- FLASK KEEP-ALIVE SERVER (For Render) ---
 app = Flask(__name__)
 
@@ -26,7 +40,6 @@ def health_check():
     return "Bot is alive!", 200
 
 def run_flask():
-    # Render provides a PORT environment variable. Default to 8080 if not set.
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
@@ -49,14 +62,23 @@ logging.basicConfig(
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚖 **GEG Driver Assistant**\n\n"
+        "🚖 **GEG Pro Driver Assistant**\n\n"
         "commands:\n"
-        "/graph - 📊 Visual Chart (Best View)\n"
-        "/delays - ⚠️ Delay Watch\n"
-        "/status - 🚦 Driver Advice\n"
-        "/departures - Next 10 departures\n"
-        "/arrivals - Next 10 arrivals"
+        "/graph - 📊 Demand Chart (Green=Pickups)\n"
+        "/status - 🚦 Strategy & Weather\n"
+        "/arrivals - 🛬 Next Pickups (w/ Zones)\n"
+        "/departures - 🛫 Next Drop-offs\n"
+        "/delays - ⚠️ Delay Watch"
     )
+
+def get_weather():
+    """Fetches simple weather for GEG without API key using wttr.in"""
+    try:
+        # Returns: "Clear +10°C"
+        response = requests.get("https://wttr.in/GEG?format=%C+%t")
+        return response.text.strip()
+    except:
+        return "Weather unavailable"
 
 def get_flight_data(mode='departure'):
     global flight_cache
@@ -89,16 +111,28 @@ def process_data_into_df():
     arrs = get_flight_data('arrival')
     
     all_flights = []
+    
+    def get_zone_and_check_passenger(flight):
+        if not flight.get('airline'): return None
+        iata = flight['airline'].get('iata')
+        return PASSENGER_AIRLINES.get(iata) # Returns "Zone C" or None
+
     for f in deps:
         if f['departure']['scheduled']:
-            dt = datetime.fromisoformat(f['departure']['scheduled'].replace('Z', '+00:00'))
-            all_flights.append({'time': dt, 'type': 'Departure', 'status': f['flight_status']})
+            zone = get_zone_and_check_passenger(f)
+            if zone:
+                dt = datetime.fromisoformat(f['departure']['scheduled'].replace('Z', '+00:00'))
+                all_flights.append({'time': dt, 'type': 'Departure', 'status': f['flight_status'], 'zone': zone})
+            
     for f in arrs:
         if f['arrival']['scheduled']:
-            dt = datetime.fromisoformat(f['arrival']['scheduled'].replace('Z', '+00:00'))
-            all_flights.append({'time': dt, 'type': 'Arrival', 'status': f['flight_status']})
+            zone = get_zone_and_check_passenger(f)
+            if zone:
+                dt = datetime.fromisoformat(f['arrival']['scheduled'].replace('Z', '+00:00'))
+                all_flights.append({'time': dt, 'type': 'Arrival', 'status': f['flight_status'], 'zone': zone})
             
     if not all_flights: return pd.DataFrame()
+    
     df = pd.DataFrame(all_flights)
     now = datetime.now(df.iloc[0]['time'].tzinfo)
     df = df[(df['time'] >= now) & (df['time'] <= now + timedelta(hours=24))]
@@ -106,10 +140,10 @@ def process_data_into_df():
     return df
 
 async def send_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await update.message.reply_text("🎨 Drawing flight chart...")
+    status_msg = await update.message.reply_text("🎨 Analyzing next 24h demand...")
     df = process_data_into_df()
     if df.empty:
-        await status_msg.edit_text("No flight data available.")
+        await status_msg.edit_text("No passenger flights found.")
         return
 
     hourly = df.groupby(['hour', 'type']).size().unstack(fill_value=0)
@@ -117,9 +151,12 @@ async def send_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if col not in hourly.columns: hourly[col] = 0
 
     plt.figure(figsize=(10, 6))
-    plt.bar(hourly.index - 0.2, hourly['Departure'], width=0.4, label='Drop-offs', color='#e74c3c')
-    plt.bar(hourly.index + 0.2, hourly['Arrival'], width=0.4, label='Pick-ups', color='#2ecc71')
-    plt.title('GEG Airport Demand (Next 24h)')
+    plt.bar(hourly.index - 0.2, hourly['Departure'], width=0.4, label='Drop-offs (City -> GEG)', color='#e74c3c')
+    plt.bar(hourly.index + 0.2, hourly['Arrival'], width=0.4, label='Pick-ups (GEG -> City)', color='#2ecc71')
+    plt.title('GEG Driver Demand (Next 24h)')
+    plt.xlabel('Hour (24h)')
+    plt.ylabel('Est. Rides')
+    plt.xticks(range(0, 24))
     plt.legend()
     plt.grid(axis='y', linestyle='--', alpha=0.7)
     
@@ -127,44 +164,88 @@ async def send_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
     plt.savefig(buf, format='png')
     buf.seek(0)
     plt.close()
-    await update.message.reply_photo(photo=buf, caption="📊 **Green** = Pickups | **Red** = Dropoffs")
+    await update.message.reply_photo(photo=buf, caption="📊 **Green** = Wait at Airport\n**Red** = Drive people TO Airport")
     await status_msg.delete()
 
 async def check_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
     df = process_data_into_df()
     if df.empty: return await update.message.reply_text("No data.")
     delays = df[df['status'].isin(['active', 'delayed', 'cancelled'])]
-    if delays.empty: await update.message.reply_text("✅ No major delays.")
+    if delays.empty: await update.message.reply_text("✅ No major passenger delays.")
     else:
-        msg = "⚠️ **DELAYS**\n"
-        for _, row in delays.iterrows(): msg += f"{row['time'].strftime('%H:%M')} - {row['status']}\n"
+        msg = "⚠️ **PASSENGER DELAYS**\n"
+        for _, row in delays.iterrows(): msg += f"{row['time'].strftime('%H:%M')} - {row['status'].upper()} ({row['zone']})\n"
         await update.message.reply_text(msg)
 
 async def driver_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    weather = get_weather()
     df = process_data_into_df()
     if df.empty: return
+    
     now_hour = datetime.now().hour
     next_3 = df[(df['hour'] >= now_hour) & (df['hour'] <= now_hour + 3)]
-    arr = len(next_3[next_3['type'] == 'Arrival'])
-    msg = "🔥 HIGH DEMAND" if arr >= 5 else "✅ MODERATE" if arr >= 2 else "💤 LOW DEMAND"
-    await update.message.reply_text(f"🚦 **Next 3 Hours:**\nArrivals: {arr}\n\n{msg}")
+    
+    arr_c = len(next_3[(next_3['type'] == 'Arrival') & (next_3['zone'].str.contains('Zone C'))])
+    arr_ab = len(next_3[(next_3['type'] == 'Arrival') & (next_3['zone'].str.contains('Zone A/B'))])
+    total = arr_c + arr_ab
+    
+    msg = ""
+    if total >= 5: msg = "🔥 **HIGH SURGE LIKELY**"
+    elif total >= 3: msg = "✅ **MODERATE DEMAND**"
+    else: msg = "💤 **LOW DEMAND**"
+    
+    # Strategy Advice
+    strategy = "Sit in TNC Lot."
+    if arr_c > arr_ab: strategy = "Expect **ALASKA** rush (North Zone C)."
+    elif arr_ab > arr_c: strategy = "Expect **DELTA/UNITED** rush (South Zone A/B)."
+
+    await update.message.reply_text(
+        f"🌤 **Weather:** {weather}\n"
+        f"🚦 **Next 3 Hours:** {total} Arrivals\n\n"
+        f"{msg}\n"
+        f"💡 **Tip:** {strategy}"
+    )
 
 async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = 'departure' if 'departures' in update.message.text else 'arrival'
     flights = get_flight_data(mode)
     if not flights: return await update.message.reply_text("No data.")
-    valid = [f for f in flights if f[mode]['scheduled']]
-    valid.sort(key=lambda x: x[mode]['scheduled'])
-    msg = f"✈️ **Next {mode.title()}s**\n"
-    for f in valid[:10]:
-        msg += f"`{f[mode]['scheduled'].split('T')[1][:5]}` - {f['airline']['name']}\n"
+    
+    valid = []
+    for f in flights:
+        if f[mode]['scheduled'] and f.get('airline'):
+            zone = PASSENGER_AIRLINES.get(f['airline'].get('iata'))
+            if zone:
+                valid.append({'data': f, 'zone': zone})
+    
+    # Sort
+    valid.sort(key=lambda x: x['data'][mode]['scheduled'])
+    
+    msg = f"✈️ **Next {mode.title()}s**\n\n"
+    for item in valid[:12]:
+        f = item['data']
+        zone = item['zone']
+        raw_time = f[mode]['scheduled'] # 2025-12-06T14:30:00+00:00
+        
+        # Calculate 'Curbside Time' (Arrival + 20 mins)
+        dt = datetime.fromisoformat(raw_time.replace('Z', '+00:00'))
+        
+        if mode == 'arrival':
+            curbside_time = dt + timedelta(minutes=20)
+            time_display = f"{dt.strftime('%H:%M')} ➔ **{curbside_time.strftime('%H:%M')}** (Ready)"
+        else:
+            time_display = dt.strftime('%H:%M')
+
+        flight_num = f['flight']['iata']
+        airline_code = f['airline']['iata']
+        
+        # Format: 14:30 -> 14:50 (Ready) | AS123 [Zone C]
+        msg += f"`{time_display}` | {flight_num} [{zone.split(' ')[1]}]\n"
+        
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 if __name__ == '__main__':
-    # 1. Start the fake web server so Render doesn't kill the app
     keep_alive()
-    
-    # 2. Start the Bot
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('graph', send_graph))
