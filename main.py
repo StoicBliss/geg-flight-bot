@@ -18,20 +18,22 @@ AVIATIONSTACK_API_KEY = os.getenv("AVIATION_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 AIRPORT_IATA = 'GEG'
 
-# --- CONSTANTS ---
+# --- VERIFIED TERMINAL DATA (Source: spokaneairports.net) ---
+# Zone C (North): Alaska, American, Frontier
+# Zone A/B (South): Delta, United, Southwest, Allegiant, Sun Country
 PASSENGER_AIRLINES = {
     'AS': 'Zone C (Alaska)', 
-    'G4': 'Zone C (Allegiant)',
+    'AA': 'Zone C (American)', 
+    'F9': 'Zone C (Frontier)', 
     'DL': 'Zone A/B (Delta)', 
     'UA': 'Zone A/B (United)', 
     'WN': 'Zone A/B (Southwest)', 
-    'AA': 'Zone A/B (American)',
-    'F9': 'Zone A/B (Frontier)',
+    'G4': 'Zone A/B (Allegiant)',
     'SY': 'Zone A/B (Sun Country)'
 }
 
-# Link to GEG TNC Waiting Lot (Coordinates)
-TNC_LOT_MAP_URL = "https://www.google.com/maps/search/?api=1&query=47.621980,-117.533850"
+# Coordinates for GEG Rideshare (TNC) Waiting Lot
+TNC_LOT_MAP_URL = "https://www.google.com/maps/search/?api=1&query=Spokane+International+Airport+Cell+Phone+Lot"
 
 # --- FLASK KEEP-ALIVE ---
 app = Flask(__name__)
@@ -63,7 +65,7 @@ logging.basicConfig(
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚖 **GEG Pro Driver Assistant v4.0**\n\n"
+        "🚖 **GEG Pro Driver Assistant v5.0**\n\n"
         "commands:\n"
         "/status - 🚦 Strategy, Weather & Best Shifts\n"
         "/graph - 📊 Demand Chart\n"
@@ -75,7 +77,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def navigate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends a button to open Google Maps."""
-    keyboard = [[InlineKeyboardButton("🗺️ Open Google Maps (TNC Lot)", url=TNC_LOT_MAP_URL)]]
+    keyboard = [[InlineKeyboardButton("🗺️ Open Google Maps (Waiting Lot)", url=TNC_LOT_MAP_URL)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Tap below to start navigation:", reply_markup=reply_markup)
 
@@ -250,13 +252,11 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # --- SURGE CLUSTER LOGIC (Arrivals Only) ---
         if mode == 'arrival':
-            # If this flight is within 20 mins of the last one, it's a cluster
             if last_time and (dt - last_time < timedelta(minutes=20)):
                 cluster_count += 1
             else:
                 cluster_count = 1 
             
-            # If we hit 3 flights in a row closely packed, insert alert
             if cluster_count == 3:
                  msg += "⚡️ **SURGE CLUSTER DETECTED** ⚡️\n\n"
 
