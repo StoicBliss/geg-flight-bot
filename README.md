@@ -1,4 +1,4 @@
-# 🚖 GEG Airport Pro Driver Assistant (v4.0)
+# 🚖 GEG Airport Pro Driver Assistant (v5.0)
 
 **The ultimate strategy tool for Uber, Lyft, and Rideshare drivers at Spokane International Airport (GEG).**
 
@@ -18,8 +18,8 @@ Stop guessing when to drive. The `/status` command analyzes the next 24 hours of
 
 ### 3. 📍 Intelligent Zone Targeting
 Spokane Airport is split into two distinct pickup zones. The bot tells you exactly where to drive based on the airline:
-* **Zone C (North):** Alaska, American, Allegiant.
-* **Zone A/B (South):** Delta, United, Southwest.
+* **Zone C (North):** Alaska, American, Frontier.
+* **Zone A/B (South):** Delta, United, Southwest, Allegiant, Sun Country.
 
 ### 4. ⏱️ "Curbside" Readiness Timer
 A plane landing on the runway doesn't mean a passenger is ready. The bot adds a smart buffer (~20 mins) to the arrival time, showing you the "Ready" time so you don't wait unpaid at the curb.
@@ -65,12 +65,12 @@ The bot gives you two specific times for every flight:
 
 ---
 
-## 🗺️ GEG Zone Reference
+## 🗺️ GEG Zone Reference (Official)
 
 | Zone | Airlines | Driver Location |
 | :--- | :--- | :--- |
-| **Zone C** | **Alaska**, American (Select), Allegiant | **North End.** Turn left at the split towards Concourse C. |
-| **Zone A/B** | **Delta, United, Southwest** | **South/Center.** The main rotunda pickup area. |
+| **Zone C** | **Alaska, American, Frontier** | **North End.** Turn left at the split towards Concourse C. |
+| **Zone A/B** | **Delta, United, Southwest, Allegiant, Sun Country** | **South/Center.** The main rotunda pickup area. |
 
 ---
 
