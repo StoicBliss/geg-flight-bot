@@ -1,68 +1,50 @@
+import os
 import logging
-from datetime import datetime, timezone
-import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ---------------- CONFIG ---------------- #
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-AIRPORT_ICAO = "YOUR_AIRPORT_ICAO"
+# ------------------ Configuration ------------------
 
-# OpenSky credentials
-OPENSKY_USERNAME = "YOUR_OPENSKY_USERNAME"
-OPENSKY_PASSWORD = "YOUR_OPENSKY_PASSWORD"
+# Fetch credentials from environment variables
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+OPENSKY_USERNAME = os.environ.get("OPENSKY_USERNAME")
+OPENSKY_PASSWORD = os.environ.get("OPENSKY_PASSWORD")
+AIRPORT_ICAO = os.environ.get("AIRPORT_ICAO", "KJFK")  # default example
 
-# ---------------- LOGGING ---------------- #
+# Validate critical variables
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN environment variable is not set!")
+if not OPENSKY_USERNAME or not OPENSKY_PASSWORD:
+    raise ValueError("OpenSky credentials are not set!")
+if not AIRPORT_ICAO:
+    raise ValueError("AIRPORT_ICAO environment variable is not set!")
+
+# ------------------ Logging ------------------
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
+
 logger = logging.getLogger(__name__)
 
-# ---------------- COMMANDS ---------------- #
+# ------------------ Command Handlers ------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hello! I'm your flight bot. Use /departures to get upcoming flights.")
+    await update.message.reply_text("Hello! Flight bot is online ✈️")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("/departures - Get upcoming flights from the airport")
+    await update.message.reply_text("/start - Start the bot\n/help - Show this message")
 
-async def departures(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Time window: now to 12 hours ahead
-    now_ts = int(datetime.now(timezone.utc).timestamp())
-    end_ts = now_ts + 3600 * 12
-    url = f"https://opensky-network.org/api/flights/departure?airport={AIRPORT_ICAO}&begin={now_ts}&end={end_ts}"
-
-    try:
-        response = requests.get(url, auth=(OPENSKY_USERNAME, OPENSKY_PASSWORD))
-        if response.status_code == 200:
-            flights = response.json()
-            if not flights:
-                await update.message.reply_text("No upcoming departures found.")
-                return
-
-            message = "Upcoming departures:\n"
-            for f in flights[:10]:  # limit to 10 flights to avoid long messages
-                callsign = f.get("callsign", "N/A").strip()
-                est_departure = datetime.fromtimestamp(f.get("firstSeen", now_ts), tz=timezone.utc)
-                message += f"{callsign} at {est_departure.strftime('%Y-%m-%d %H:%M UTC')}\n"
-
-            await update.message.reply_text(message)
-        else:
-            logger.warning(f"OpenSky request failed: {response.status_code}")
-            await update.message.reply_text("Failed to fetch flight data. Please try again later.")
-    except Exception as e:
-        logger.error(f"Error fetching departures: {e}")
-        await update.message.reply_text("An error occurred while fetching flight data.")
-
-# ---------------- MAIN ---------------- #
-if __name__ == "__main__":
+# ------------------ Main ------------------
+def main():
+    # Build the bot application
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    # Register commands
+    # Register command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("departures", departures))
 
-    # Start bot
-    logger.info("Starting bot...")
+    # Start the bot with polling
     app.run_polling()
+
+if __name__ == "__main__":
+    main()
