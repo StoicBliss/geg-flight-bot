@@ -115,7 +115,7 @@ def process_data_into_df():
     def get_zone_and_check_passenger(flight):
         if not flight.get('airline'): return None
         iata = flight['airline'].get('iata')
-        return PASSENGER_AIRLINES.get(iata) # Returns "Zone C" or None
+        return PASSENGER_AIRLINES.get(iata)
 
     for f in deps:
         if f['departure']['scheduled']:
@@ -151,8 +151,8 @@ async def send_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if col not in hourly.columns: hourly[col] = 0
 
     plt.figure(figsize=(10, 6))
-    plt.bar(hourly.index - 0.2, hourly['Departure'], width=0.4, label='Drop-offs (City -> GEG)', color='#e74c3c')
-    plt.bar(hourly.index + 0.2, hourly['Arrival'], width=0.4, label='Pick-ups (GEG -> City)', color='#2ecc71')
+    plt.bar(hourly.index - 0.2, hourly['Departure'], width=0.4, label='Drop-offs', color='#e74c3c')
+    plt.bar(hourly.index + 0.2, hourly['Arrival'], width=0.4, label='Pick-ups', color='#2ecc71')
     plt.title('GEG Driver Demand (Next 24h)')
     plt.xlabel('Hour (24h)')
     plt.ylabel('Est. Rides')
@@ -164,7 +164,7 @@ async def send_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
     plt.savefig(buf, format='png')
     buf.seek(0)
     plt.close()
-    await update.message.reply_photo(photo=buf, caption="📊 **Green** = Wait at Airport\n**Red** = Drive people TO Airport")
+    await update.message.reply_photo(photo=buf, caption="📊 **Green** = Pickups | **Red** = Dropoffs")
     await status_msg.delete()
 
 async def check_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -194,7 +194,6 @@ async def driver_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif total >= 3: msg = "✅ **MODERATE DEMAND**"
     else: msg = "💤 **LOW DEMAND**"
     
-    # Strategy Advice
     strategy = "Sit in TNC Lot."
     if arr_c > arr_ab: strategy = "Expect **ALASKA** rush (North Zone C)."
     elif arr_ab > arr_c: strategy = "Expect **DELTA/UNITED** rush (South Zone A/B)."
@@ -209,7 +208,7 @@ async def driver_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = 'departure' if 'departures' in update.message.text else 'arrival'
     flights = get_flight_data(mode)
-    if not flights: return await update.message.reply_text("No data.")
+    if not flights: return await update.message.reply_text("No data currently available.")
     
     valid = []
     for f in flights:
@@ -218,29 +217,38 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if zone:
                 valid.append({'data': f, 'zone': zone})
     
-    # Sort
     valid.sort(key=lambda x: x['data'][mode]['scheduled'])
     
-    msg = f"✈️ **Next {mode.title()}s**\n\n"
-    for item in valid[:12]:
-        f = item['data']
-        zone = item['zone']
-        raw_time = f[mode]['scheduled'] # 2025-12-06T14:30:00+00:00
+    title = "Incoming Pickups" if mode == 'arrival' else "Departing Drop-offs"
+    msg = f"**{title}**\n\n"
+    
+    count = 0
+    for item in valid:
+        if count >= 10: break
         
-        # Calculate 'Curbside Time' (Arrival + 20 mins)
+        f = item['data']
+        zone_raw = item['zone']
+        
+        airline_name = f['airline']['name']
+        airline_name = airline_name.replace(" Airlines", "").replace(" Air Lines", "").replace(" Inc.", "").strip()
+        flight_num = f['flight']['iata']
+        
+        raw_time = f[mode]['scheduled']
         dt = datetime.fromisoformat(raw_time.replace('Z', '+00:00'))
+        time_str = dt.strftime('%H:%M')
         
         if mode == 'arrival':
             curbside_time = dt + timedelta(minutes=20)
-            time_display = f"{dt.strftime('%H:%M')} ➔ **{curbside_time.strftime('%H:%M')}** (Ready)"
+            curbside_str = curbside_time.strftime('%H:%M')
+            simple_zone = zone_raw.split('(')[0].strip()
+            
+            msg += f"**{airline_name}** ({flight_num})\n"
+            msg += f"Touchdown: `{time_str}` | Ready: `{curbside_str}`\n"
+            msg += f"Location: {simple_zone}\n\n"
         else:
-            time_display = dt.strftime('%H:%M')
-
-        flight_num = f['flight']['iata']
-        airline_code = f['airline']['iata']
+            msg += f"`{time_str}` • **{airline_name}** ({flight_num})\n"
         
-        # Format: 14:30 -> 14:50 (Ready) | AS123 [Zone C]
-        msg += f"`{time_display}` | {flight_num} [{zone.split(' ')[1]}]\n"
+        count += 1
         
     await update.message.reply_text(msg, parse_mode='Markdown')
 
