@@ -1,7 +1,8 @@
 python-telegram-bot==21.7
-beautifulsoup4
 requests
-matplotlib
-sqlite-utils
-prophet
+beautifulsoup4
 pandas
+prophet
+matplotlib
+apscheduler
+sqlite-utils
