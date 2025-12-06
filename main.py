@@ -26,7 +26,8 @@ GEG_LON = -117.5352
 # --- TIMEZONE SETUP ---
 SPOKANE_TZ = pytz.timezone('US/Pacific')
 
-# --- FINAL VERIFIED TERMINAL DATA ---
+# --- FINAL VERIFIED TERMINAL DATA (v8.0) ---
+# Verified against Official GEG Terminal Maps (2025)
 PASSENGER_AIRLINES = {
     'AS': 'Zone C (Alaska)', 
     'AA': 'Zone C (American)', 
@@ -38,7 +39,7 @@ PASSENGER_AIRLINES = {
     'SY': 'Zone A/B (Sun Country)'
 }
 
-# TNC Waiting Lot Location
+# Universal Google Maps Query for TNC/Cell Phone Lot
 TNC_LOT_MAP_URL = "https://www.google.com/maps/search/?api=1&query=Spokane+International+Airport+Cell+Phone+Waiting+Lot"
 
 # --- FLASK KEEP-ALIVE ---
@@ -134,6 +135,7 @@ def process_data_into_df():
     
     def parse_and_convert(time_str):
         if not time_str: return None
+        # Parse UTC time and convert to Spokane Time
         dt_utc = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
         return dt_utc.astimezone(SPOKANE_TZ)
 
@@ -163,14 +165,14 @@ def process_data_into_df():
 # --- COMMAND HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "GEG Pro Driver Assistant v7.2\n\n"
+        "GEG Pro Driver Assistant v8.0\n\n"
         "commands:\n"
         "/status - Strategy, Weather & Best Shifts\n"
         "/graph - Demand Chart\n"
         "/arrivals - Pickups (Live)\n"
         "/departures - Drop-offs (Live)\n"
-        "/delays - Check for Delays\n"  # <-- Added Missing Command
-        "/navigate - GPS to TNC Lot"
+        "/navigate - GPS to TNC Lot\n"
+        "/delays - Check for Delays"
     )
 
 async def navigate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -245,7 +247,7 @@ async def driver_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         best_shift_str = "None"
     
-    # --- V6 CLEAN LAYOUT (FIXED MARKDOWN) ---
+    # --- V8.0 CLEAN LAYOUT (CORRECTED MARKDOWN) ---
     output = f"*GEG DRIVER STATUS REPORT*\n\n"
     output += f"Current Time: *{now_spokane.strftime('%H:%M')}*\n"
     output += f"Current Weather: {weather}\n"
