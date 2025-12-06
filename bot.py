@@ -130,7 +130,6 @@ def main():
     
     # Set webhook
     webhook_path = f"/{TELEGRAM_TOKEN}"
-    app.bot.set_webhook(url=f"{APP_URL}/{TELEGRAM_TOKEN}")
     
     print(f"🚀 GEGFlightBot started on webhook {APP_URL}/{TELEGRAM_TOKEN}")
     
