@@ -1,143 +1,112 @@
-import asyncio
-import logging
 import os
+import logging
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from scraper import scrape_flights
 from db import init_db, save_flights
-from ml import forecast, train_model
+from ml import train_model, forecast
 from flight_plot import plot_forecast
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-
+from flask import Flask, request
 
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")   # e.g. https://geg-flight-bot.onrender.com/webhook
+PORT = int(os.getenv("PORT", 8000))
 
 scheduler = AsyncIOScheduler()
-
 
 # ------------------------------
 # Commands
 # ------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 GEG Flight Bot Ready!\n"
-        "Commands:\n"
-        "/departures – current departures\n"
-        "/arrivals – current arrivals\n"
-        "/forecast – next 12h ML forecast\n"
-    )
-
+    await update.message.reply_text("GEG Bot online! Webhook active.")
 
 async def departures(update: Update, context: ContextTypes.DEFAULT_TYPE):
     flights = scrape_flights("departure")
     save_flights(flights, "departure")
-
     txt = ["✈️ *Departures*"]
     for f in flights:
         txt.append(f"{f['hour']:02d}:00 – {f['airline']} → {f['destination']}")
-
     await update.message.reply_text("\n".join(txt), parse_mode="Markdown")
-
 
 async def arrivals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     flights = scrape_flights("arrival")
     save_flights(flights, "arrival")
-
     txt = ["📉 *Arrivals*"]
     for f in flights:
         txt.append(f"{f['hour']:02d}:00 – {f['airline']} from {f['destination']}")
-
     await update.message.reply_text("\n".join(txt), parse_mode="Markdown")
 
-
 async def forecast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    hours = 12
-    if context.args and context.args[0].isdigit():
-        hours = int(context.args[0])
-
-    await update.message.reply_text("🧠 Loading forecast…")
-
-    fc = forecast(hours)
-    if fc is None:
-        await update.message.reply_text("Not enough data to forecast.")
-        return
-
-    lines = ["📈 *Forecasted Demand*"]
-    for _, row in fc.iterrows():
-        lines.append(f"{row['ds']:%b %d %I %p}: {row['yhat']:.1f} flights")
-
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
+    await update.message.reply_text("🧠 Computing forecast…")
+    fc = forecast(12)
     img = plot_forecast(fc)
     await update.message.reply_photo(img)
 
+# ------------------------------
+# Schedule jobs (safe inside loop)
+# ------------------------------
+
+async def on_start(app):
+    if not scheduler.running:
+        scheduler.add_job(train_model, CronTrigger(hour=2, timezone="US/Pacific"))
+        scheduler.add_job(lambda: save_flights(scrape_flights("departure"), "departure"),
+                          CronTrigger(minute="*/30", timezone="US/Pacific"))
+        scheduler.add_job(lambda: save_flights(scrape_flights("arrival"), "arrival"),
+                          CronTrigger(minute="*/30", timezone="US/Pacific"))
+        scheduler.start()
+        print("Scheduler started.")
 
 # ------------------------------
-# Scheduler Setup
+# Flask Webhook Server (REQUIRED)
 # ------------------------------
 
-async def on_startup(app):
-    """Runs once when Telegram bot starts; safe place to start scheduler."""
+flask_app = Flask(__name__)
+tg_app = None  # will be set in main()
 
-    if scheduler.running:
-        return  # already running
 
-    # Nightly ML training (2 AM Pacific)
-    scheduler.add_job(
-        train_model,
-        CronTrigger(hour=2, minute=0, timezone="US/Pacific"),
-        id="nightly_training"
-    )
-
-    # Scrape departures every 30 min
-    scheduler.add_job(
-        lambda: save_flights(scrape_flights("departure"), "departure"),
-        CronTrigger(minute="*/30", timezone="US/Pacific"),
-        id="scrape_departures"
-    )
-
-    # Scrape arrivals every 30 min
-    scheduler.add_job(
-        lambda: save_flights(scrape_flights("arrival"), "arrival"),
-        CronTrigger(minute="*/30", timezone="US/Pacific"),
-        id="scrape_arrivals"
-    )
-
-    scheduler.start()
-    print("Scheduler started successfully.")
-
+@flask_app.post("/webhook")
+def webhook_handler():
+    """Handle incoming Telegram webhook updates."""
+    json_data = request.get_json(force=True)
+    asyncio.get_event_loop().create_task(tg_app.process_update(Update.de_json(json_data, tg_app.bot)))
+    return "ok", 200
 
 # ------------------------------
-# Main
+# MAIN — start webhook bot + flask server
 # ------------------------------
 
 def main():
+    global tg_app
     init_db()
 
-    app = (
+    tg_app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
-        .post_init(on_startup)   # <--- FIX: Scheduler starts here
+        .post_init(on_start)
         .build()
     )
 
-    # Commands
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("departures", departures))
-    app.add_handler(CommandHandler("arrivals", arrivals))
-    app.add_handler(CommandHandler("forecast", forecast_cmd))
+    tg_app.add_handler(CommandHandler("start", start))
+    tg_app.add_handler(CommandHandler("departures", departures))
+    tg_app.add_handler(CommandHandler("arrivals", arrivals))
+    tg_app.add_handler(CommandHandler("forecast", forecast_cmd))
 
-    print("Bot running.")
-    app.run_polling()
+    # Set the webhook
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(
+        tg_app.bot.set_webhook(f"{WEBHOOK_URL}")
+    )
+
+    print(f"Webhook set to {WEBHOOK_URL}")
+
+    # Run Flask (Render will expose it)
+    flask_app.run(host="0.0.0.0", port=PORT)
 
 
 if __name__ == "__main__":
