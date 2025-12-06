@@ -5,13 +5,15 @@ import pandas as pd
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --------- Read credentials from environment variables ---------
+# --------- Environment Variables ---------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 OPENSKY_USERNAME = os.environ.get("OPENSKY_USERNAME")
 OPENSKY_PASSWORD = os.environ.get("OPENSKY_PASSWORD")
+PORT = int(os.environ.get("PORT", 8000))  # Render assigns this automatically
+APP_URL = os.environ.get("APP_URL")  # Your Render app HTTPS URL (e.g., https://mygegflightbot.onrender.com)
 
-if not all([TELEGRAM_TOKEN, OPENSKY_USERNAME, OPENSKY_PASSWORD]):
-    raise ValueError("Please set TELEGRAM_TOKEN, OPENSKY_USERNAME, and OPENSKY_PASSWORD as environment variables.")
+if not all([TELEGRAM_TOKEN, OPENSKY_USERNAME, OPENSKY_PASSWORD, APP_URL]):
+    raise ValueError("Set TELEGRAM_TOKEN, OPENSKY_USERNAME, OPENSKY_PASSWORD, and APP_URL as environment variables.")
 
 # --------- Flight Data Functions ---------
 def get_departures(hours_back=24):
@@ -55,7 +57,6 @@ def get_upcoming_departures(hours_ahead=12):
     return df
 
 def departures_by_hour(df):
-    """Summarize departures by hour."""
     if df.empty:
         return "No data available."
     summary = df.groupby('hour').size().sort_index()
@@ -65,7 +66,6 @@ def departures_by_hour(df):
     return message
 
 def predict_peak_hours(days=7):
-    """Predict peak departure hours using last X days."""
     now = int(time.time())
     begin = now - days*24*3600
     end = now
@@ -83,7 +83,7 @@ def predict_peak_hours(days=7):
     
     df = pd.DataFrame(data)
     df['hour'] = pd.to_datetime(df['firstSeen'], unit='s').dt.hour
-    summary = df.groupby('hour').size() / days  # average per hour
+    summary = df.groupby('hour').size() / days
     summary = summary.sort_index()
     return summary
 
@@ -120,7 +120,7 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = format_prediction(summary)
     await update.message.reply_text(message)
 
-# --------- Main Bot ---------
+# --------- Main Bot (Webhook Mode) ---------
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -128,8 +128,18 @@ def main():
     app.add_handler(CommandHandler("upcoming", upcoming))
     app.add_handler(CommandHandler("predict", predict))
     
-    print("🚀 GEGFlightBot started...")
-    app.run_polling()
+    # Set webhook
+    webhook_path = f"/{TELEGRAM_TOKEN}"
+    app.bot.set_webhook(url=f"{APP_URL}/{TELEGRAM_TOKEN}")
+    
+    print(f"🚀 GEGFlightBot started on webhook {APP_URL}/{TELEGRAM_TOKEN}")
+    
+    # Run webhook
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TELEGRAM_TOKEN
+    )
 
 if __name__ == "__main__":
     main()
