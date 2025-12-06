@@ -4,3 +4,4 @@ beautifulsoup4==4.12.2
 pytz==2025.2
 gunicorn==21.2.0
 python-telegram-bot==20.5
+apscheduler==3.10.4.post2
