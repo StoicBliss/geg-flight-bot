@@ -1,6 +1,2 @@
-python-telegram-bot==22.5
-fastapi==0.104.0
-uvicorn==0.23.2
-pandas==2.3.3
-numpy==2.3.5
-requests==2.32.5
+python-telegram-bot==20.6
+requests
