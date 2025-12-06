@@ -3,3 +3,5 @@ beautifulsoup4
 requests
 matplotlib
 sqlite-utils
+prophet
+pandas
