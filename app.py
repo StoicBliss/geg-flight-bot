@@ -1,19 +1,26 @@
 import asyncio
 import logging
+import os
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+)
 from scraper import scrape_flights
 from db import init_db, save_flights
 from ml import forecast, train_model
 from flight_plot import plot_forecast
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
-import os
 
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+scheduler = AsyncIOScheduler()
 
 
 # ------------------------------
@@ -64,51 +71,49 @@ async def forecast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Not enough data to forecast.")
         return
 
-    # Send text summary
     lines = ["📈 *Forecasted Demand*"]
     for _, row in fc.iterrows():
         lines.append(f"{row['ds']:%b %d %I %p}: {row['yhat']:.1f} flights")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-    # Send chart
     img = plot_forecast(fc)
     await update.message.reply_photo(img)
 
 
 # ------------------------------
-# Nightly Tasks
+# Scheduler Setup
 # ------------------------------
 
-def schedule_tasks(app):
-    scheduler = AsyncIOScheduler(timezone="US/Pacific")
+async def on_startup(app):
+    """Runs once when Telegram bot starts; safe place to start scheduler."""
 
-    # 1) Nightly training
+    if scheduler.running:
+        return  # already running
+
+    # Nightly ML training (2 AM Pacific)
     scheduler.add_job(
         train_model,
-        trigger="cron",
-        hour=2,
-        minute=0,
-        id="train_model"
+        CronTrigger(hour=2, minute=0, timezone="US/Pacific"),
+        id="nightly_training"
     )
 
-    # 2) Nightly scraping to build dataset
+    # Scrape departures every 30 min
     scheduler.add_job(
         lambda: save_flights(scrape_flights("departure"), "departure"),
-        trigger="cron",
-        hour="0-23",
-        minute="*/30",
-        id="scrape_deps"
+        CronTrigger(minute="*/30", timezone="US/Pacific"),
+        id="scrape_departures"
     )
+
+    # Scrape arrivals every 30 min
     scheduler.add_job(
         lambda: save_flights(scrape_flights("arrival"), "arrival"),
-        trigger="cron",
-        hour="0-23",
-        minute="*/30",
-        id="scrape_arrs"
+        CronTrigger(minute="*/30", timezone="US/Pacific"),
+        id="scrape_arrivals"
     )
 
     scheduler.start()
+    print("Scheduler started successfully.")
 
 
 # ------------------------------
@@ -118,16 +123,18 @@ def schedule_tasks(app):
 def main():
     init_db()
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_init(on_startup)   # <--- FIX: Scheduler starts here
+        .build()
+    )
 
     # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("departures", departures))
     app.add_handler(CommandHandler("arrivals", arrivals))
     app.add_handler(CommandHandler("forecast", forecast_cmd))
-
-    # Background schedule
-    schedule_tasks(app)
 
     print("Bot running.")
     app.run_polling()
