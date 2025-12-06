@@ -28,8 +28,6 @@ SPOKANE_TZ = pytz.timezone('US/Pacific')
 
 # --- FINAL VERIFIED TERMINAL DATA ---
 # This list is verified against the official Spokane Airport website (Dec 2025)
-# Zone C (North): Alaska, American, Frontier
-# Zone A/B (South): Delta, United, Southwest, Allegiant, Sun Country
 PASSENGER_AIRLINES = {
     'AS': 'Zone C (Alaska)', 
     'AA': 'Zone C (American)', 
@@ -42,7 +40,7 @@ PASSENGER_AIRLINES = {
 }
 
 # TNC Waiting Lot Location (Based on estimated coordinates of the Cell Phone Lot)
-TNC_LOT_MAP_URL = f"https://www.google.com/maps/search/?api=1&query=47.6186,-117.5338" 
+TNC_LOT_MAP_URL = f"http://googleusercontent.com/maps.google.com/6" 
 
 # --- FLASK KEEP-ALIVE ---
 app = Flask(__name__)
@@ -74,7 +72,6 @@ logging.basicConfig(
 
 # --- WEATHER FUNCTION (OpenWeatherMap) ---
 def get_weather():
-    """Fetches current weather from OpenWeatherMap using coordinates."""
     if not OPENWEATHER_API_KEY:
         logging.error("OpenWeatherMap API Key not set.")
         return "Weather unavailable (Key missing)"
@@ -95,7 +92,7 @@ def get_weather():
         temp = round(data['main']['temp'])
         description = data['weather'][0]['description'].title()
         
-        return f"{description} {temp}°F"
+        return f"{description}, {temp}°F" # Cleaner output format
         
     except RequestException as e:
         logging.error(f"OpenWeatherMap API request failed: {e}")
@@ -137,7 +134,6 @@ def process_data_into_df():
     
     def parse_and_convert(time_str):
         if not time_str: return None
-        # Parse UTC time and convert to Spokane Time
         dt_utc = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
         return dt_utc.astimezone(SPOKANE_TZ)
 
@@ -148,14 +144,12 @@ def process_data_into_df():
     for f in deps:
         dt = parse_and_convert(f['departure']['scheduled'])
         zone = get_zone(f)
-        # Filter: Must have time, be a passenger airline, AND be in the future
         if dt and zone and dt > now_spokane:
             all_flights.append({'time': dt, 'type': 'Departure', 'status': f['flight_status'], 'zone': zone})
             
     for f in arrs:
         dt = parse_and_convert(f['arrival']['scheduled'])
         zone = get_zone(f)
-        # Filter: Must have time, be a passenger airline, AND be in the future
         if dt and zone and dt > now_spokane:
             all_flights.append({'time': dt, 'type': 'Arrival', 'status': f['flight_status'], 'zone': zone})
             
@@ -169,22 +163,22 @@ def process_data_into_df():
 # --- COMMAND HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚖 **GEG Pro Driver Assistant v6.0**\n\n"
+        "GEG Pro Driver Assistant v7.0\n\n"
         "commands:\n"
-        "/status - 🚦 Strategy, Weather & Best Shifts\n"
-        "/graph - 📊 Demand Chart\n"
-        "/arrivals - 🛬 Pickups (Live)\n"
-        "/departures - 🛫 Drop-offs (Live)\n"
-        "/navigate - 🗺️ GPS to TNC Lot"
+        "/status - Strategy, Weather & Best Shifts\n"
+        "/graph - Demand Chart\n"
+        "/arrivals - Pickups (Live)\n"
+        "/departures - Drop-offs (Live)\n"
+        "/navigate - GPS to TNC Lot"
     )
 
 async def navigate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("🗺️ Open Google Maps (Waiting Lot)", url=TNC_LOT_MAP_URL)]]
+    keyboard = [[InlineKeyboardButton("Open Google Maps (Waiting Lot)", url=TNC_LOT_MAP_URL)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Tap below to start navigation:", reply_markup=reply_markup)
 
 async def send_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await update.message.reply_text("🎨 Syncing with Spokane time...")
+    status_msg = await update.message.reply_text("Syncing with Spokane time...")
     df = process_data_into_df()
     if df.empty:
         await status_msg.edit_text("No upcoming passenger flights found.")
@@ -208,25 +202,42 @@ async def send_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     buf = io.BytesIO()
     plt.savefig(buf, format='png')
-    plt.close()
     buf.seek(0)
-    await update.message.reply_photo(photo=buf, caption="📊 **Live Demand (Pacific Time)**")
+    plt.close()
+    await update.message.reply_photo(photo=buf, caption="Demand Chart (Pacific Time)")
     await status_msg.delete()
 
 async def driver_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     weather = get_weather()
     df = process_data_into_df()
     
+    now_spokane = datetime.now(SPOKANE_TZ)
+    now_formatted = now_spokane.strftime('%A, %b %d at %H:%M')
+
     if df.empty: 
-        await update.message.reply_text(f"🌤 **Weather:** {weather}\nNo upcoming flights found.")
+        output = f"### GEG DRIVER STATUS REPORT\n\n"
+        output += f"| METRICS | VALUE |\n| :--- | :--- |\n"
+        output += f"| Current Time | `{now_formatted}` |\n"
+        output += f"| Weather | {weather} |\n"
+        output += f"| **DEMAND LEVEL** | **LOW (NO FLIGHTS)** |\n"
+        output += "\n---\n\n*No upcoming flights found for the next 24 hours.*"
+        
+        keyboard = [[InlineKeyboardButton("Open Waiting Lot GPS", url=TNC_LOT_MAP_URL)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(output, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
-    now_spokane = datetime.now(SPOKANE_TZ)
     next_3 = df[df['time'] <= now_spokane + timedelta(hours=3)]
     arr = len(next_3[next_3['type'] == 'Arrival'])
     
-    msg = "🔥 **HIGH SURGE LIKELY**" if arr >= 6 else "✅ **MODERATE**" if arr >= 3 else "💤 **LOW DEMAND**"
+    if arr >= 6: 
+        msg_clean = "HIGH SURGE LIKELY"
+    elif arr >= 3: 
+        msg_clean = "MODERATE DEMAND"
+    else: 
+        msg_clean = "LOW DEMAND"
 
+    # Best Shift Logic
     if not df[df['type'] == 'Arrival'].empty:
         arr_hourly = df[df['type'] == 'Arrival'].groupby('hour').size()
         top_hours = arr_hourly.nlargest(3).index.tolist()
@@ -235,28 +246,34 @@ async def driver_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         best_shift_str = "None"
 
-    keyboard = [[InlineKeyboardButton("🗺️ Nav to Waiting Lot", url=TNC_LOT_MAP_URL)]]
+    # 1. Build Metrics Table
+    output = f"### GEG DRIVER STATUS REPORT\n\n"
+    output += f"| METRICS | VALUE |\n| :--- | :--- |\n"
+    output += f"| Current Time | `{now_formatted}` |\n"
+    output += f"| Current Weather | {weather} |\n"
+    output += f"| Next 3-Hour Arrivals | **{arr}** Flights |\n"
+    output += f"| **DEMAND LEVEL** | **{msg_clean}** |\n\n"
+    
+    # 2. Build Strategy Section
+    output += "---\n\n#### OPTIMAL SHIFT STRATEGY\n\n"
+    output += f"**Best Work Hours:** `{best_shift_str}`\n"
+    
+    # 3. Add Navigation Button
+    keyboard = [[InlineKeyboardButton("Open Waiting Lot GPS", url=TNC_LOT_MAP_URL)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(
-        f"🌤 **Weather:** {weather}\n"
-        f"⌚ **Spokane Time:** {now_spokane.strftime('%H:%M')}\n"
-        f"🚦 **Next 3 Hours:** {arr} Arrivals\n"
-        f"{msg}\n\n"
-        f"💰 **Best Times Today:** {best_shift_str}",
-        reply_markup=reply_markup
-    )
+    await update.message.reply_text(output, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def check_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
     df = process_data_into_df()
     if df.empty: return await update.message.reply_text("No data.")
     delays = df[df['status'].isin(['active', 'delayed', 'cancelled'])]
-    if delays.empty: await update.message.reply_text("✅ No delays on upcoming flights.")
+    if delays.empty: return await update.message.reply_text("No delays on upcoming flights.")
     else:
-        msg = "⚠️ **DELAYS (Pacific Time)**\n"
+        msg = "**DELAY REPORT (Pacific Time)**\n"
         for _, row in delays.iterrows(): 
-            msg += f"{row['time'].strftime('%H:%M')} - {row['status'].upper()} ({row['zone']})\n"
-        await update.message.reply_text(msg)
+            msg += f"{row['time'].strftime('%H:%M')} - **{row['status'].upper()}** ({row['zone']})\n"
+        await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = 'departure' if 'departures' in update.message.text else 'arrival'
@@ -281,7 +298,7 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     title = "Incoming Pickups" if mode == 'arrival' else "Departing Drop-offs"
     msg = f"**{title}**\n"
-    msg += f"⌚ _Current Time: {now_spokane.strftime('%H:%M')}_\n\n"
+    msg += f"_Current Time: {now_spokane.strftime('%H:%M')}_\n\n"
     
     last_time = None
     cluster_count = 0
@@ -303,7 +320,7 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cluster_count = 1 
             
             if cluster_count == 3:
-                 msg += "⚡️ **SURGE CLUSTER DETECTED** ⚡️\n\n"
+                 msg += "⚠️ **SURGE CLUSTER DETECTED** ⚠️\n\n" # Using text warnings, no emoji
 
             last_time = dt
             
