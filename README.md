@@ -1,6 +1,6 @@
 # 🚖 GEG Airport Pro Driver Assistant
 
-**The ultimate "Co-Pilot" bot for Uber, Lyft, and Rideshare drivers at Spokane International Airport (GEG).**
+**The ultimate bot for Uber, Lyft, and Rideshare drivers at Spokane International Airport (GEG).**
 
 This is not just a flight tracker—it is a strategy tool. It filters out cargo/private jets to show you only **passenger volume**, predicts exactly **when** passengers will be curbside, and tells you **which zone** (Concourse A/B vs C) to target.
 
@@ -65,15 +65,6 @@ This bot is designed to run 24/7 on [Render's Free Tier](https://render.com).
     * `AVIATION_API_KEY`: *Your API Key*
     * `PORT`: `8080` (Optional, Render sets this automatically)
 
-### 3. Preventing "Sleep Mode"
-Render's free tier spins down after 15 minutes of inactivity. To keep it alive 24/7:
-1.  Deploy the bot.
-2.  Copy your Render URL (e.g., `https://geg-flight-bot.onrender.com`).
-3.  Create a free account on **UptimeRobot**.
-4.  Add a new "HTTP(s)" monitor that pings your Render URL every 5 minutes.
-5.  *Result:* The bot stays awake forever for free.
-
----
 
 ## 🛠️ Local Installation (For Testing)
 
