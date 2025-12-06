@@ -1,79 +1,67 @@
 import os
 import requests
-import datetime
-from zoneinfo import ZoneInfo
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from datetime import datetime, timedelta
+from telegram.ext import ApplicationBuilder, CommandHandler
 
 OPENSKY_USER = os.getenv("OPENSKY_USER")
 OPENSKY_PASS = os.getenv("OPENSKY_PASS")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 GEG = "GEG"
-SPOKANE_TZ = ZoneInfo("America/Los_Angeles")
 
-def fetch_departures():
-    now = int(datetime.datetime.utcnow().timestamp())
-    six_hours = now + 6 * 3600
 
-    url = f"https://opensky-network.org/api/flights/departure?airport={GEG}&begin={now}&end={six_hours}"
-    response = requests.get(url, auth=(OPENSKY_USER, OPENSKY_PASS))
+def get_departures():
+    try:
+        now = int(datetime.utcnow().timestamp())
+        one_hour_later = int((datetime.utcnow() + timedelta(hours=6)).timestamp())
 
-    if response.status_code != 200:
-        return None
+        url = f"https://opensky-network.org/api/flights/departure?airport={GEG}&begin={now}&end={one_hour_later}"
 
-    return response.json()
+        r = requests.get(url, auth=(OPENSKY_USER, OPENSKY_PASS))
+        data = r.json()
 
-def group_by_hour(departures):
-    hourly = {}
+        if not data or "error" in data:
+            return "No data or API error. Try again later."
 
-    for flight in departures:
-        dep_time = flight.get("lastSeen") or flight.get("firstSeen")
-        if not dep_time:
-            continue
+        hourly = {}
 
-        dt = datetime.datetime.fromtimestamp(dep_time, SPOKANE_TZ)
-        hr = dt.replace(minute=0, second=0, microsecond=0)
+        for flight in data:
+            ts = flight.get("firstSeen")
+            if not ts:
+                continue
+            hour = datetime.utcfromtimestamp(ts).strftime("%H:00")
+            hourly[hour] = hourly.get(hour, 0) + 1
 
-        hr_str = hr.strftime("%H:00")
-        hourly[hr_str] = hourly.get(hr_str, 0) + 1
+        if not hourly:
+            return "No departures found in the selected window."
 
-    return hourly
+        result = "GEG Departures by Hour (Next Few Hours)\n\n"
+        for h, c in sorted(hourly.items()):
+            result += f"{h} UTC  {c} flights\n"
 
-async def departures(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    flights = fetch_departures()
+        return result
 
-    if not flights:
-        await update.message.reply_text("Could not get departure data right now.")
-        return
+    except Exception as e:
+        return f"Error fetching data: {e}"
 
-    grouped = group_by_hour(flights)
 
-    if not grouped:
-        await update.message.reply_text("No upcoming departures found in the next hours.")
-        return
+async def departures(update, context):
+    report = get_departures()
+    await update.message.reply_text(report)
 
-    sorted_hours = sorted(grouped.items())
 
-    text = "Upcoming departures from GEG:\n\n"
-    for hour, count in sorted_hours:
-        text += f"{hour} - {count} flights\n"
+async def start(update, context):
+    await update.message.reply_text("Welcome. Use /departures to check departure activity.")
 
-    peak = max(grouped, key=grouped.get)
-    text += f"\nPeak hour: {peak}"
-
-    await update.message.reply_text(text)
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Welcome. Use /departures to see upcoming flight activity at GEG.")
 
 def main():
-    token = os.getenv("BOT_TOKEN")
-    app = ApplicationBuilder().token(token).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("departures", departures))
 
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
