@@ -1,29 +1,35 @@
 import os
 import io
 import requests
+from requests.exceptions import RequestException
 import pandas as pd
 import matplotlib
 # Set backend to 'Agg' for headless servers (Render)
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
-import pytz  # <--- New Timezone Library
+import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import logging
 from flask import Flask
 import threading
 
 # --- CONFIGURATION ---
 AVIATIONSTACK_API_KEY = os.getenv("AVIATION_API_KEY")
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 AIRPORT_IATA = 'GEG'
+GEG_LAT = 47.6190
+GEG_LON = -117.5352
 
 # --- TIMEZONE SETUP ---
-# Forces the bot to think in Spokane time, not Server time.
 SPOKANE_TZ = pytz.timezone('US/Pacific')
 
-# --- VERIFIED TERMINAL DATA ---
+# --- FINAL VERIFIED TERMINAL DATA ---
+# This list is verified against the official Spokane Airport website (Dec 2025)
+# Zone C (North): Alaska, American, Frontier
+# Zone A/B (South): Delta, United, Southwest, Allegiant, Sun Country
 PASSENGER_AIRLINES = {
     'AS': 'Zone C (Alaska)', 
     'AA': 'Zone C (American)', 
@@ -35,7 +41,8 @@ PASSENGER_AIRLINES = {
     'SY': 'Zone A/B (Sun Country)'
 }
 
-TNC_LOT_MAP_URL = "https://www.google.com/maps/search/?api=1&query=Spokane+International+Airport+Cell+Phone+Lot"
+# TNC Waiting Lot Location (Based on estimated coordinates of the Cell Phone Lot)
+TNC_LOT_MAP_URL = f"https://www.google.com/maps/search/?api=1&query=47.6186,-117.5338" 
 
 # --- FLASK KEEP-ALIVE ---
 app = Flask(__name__)
@@ -58,36 +65,43 @@ flight_cache = {
     'departures': {'data': None, 'timestamp': None},
     'arrivals': {'data': None, 'timestamp': None}
 }
-CACHE_DURATION_MINUTES = 30 # Reduced to 30 mins for fresher data
+CACHE_DURATION_MINUTES = 30 
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🚖 **GEG Driver Assistant (Real-Time)**\n\n"
-        "commands:\n"
-        "/status - 🚦 Strategy & Best Shifts\n"
-        "/arrivals - 🛬 Pickups (Live)\n"
-        "/departures - 🛫 Drop-offs (Live)\n"
-        "/graph - 📊 Demand Chart\n"
-        "/navigate - 🗺️ GPS to Lot"
-    )
-
-async def navigate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("🗺️ Open Google Maps (Waiting Lot)", url=TNC_LOT_MAP_URL)]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Tap below to start navigation:", reply_markup=reply_markup)
-
+# --- WEATHER FUNCTION (OpenWeatherMap) ---
 def get_weather():
+    """Fetches current weather from OpenWeatherMap using coordinates."""
+    if not OPENWEATHER_API_KEY:
+        logging.error("OpenWeatherMap API Key not set.")
+        return "Weather unavailable (Key missing)"
+
+    url = "https://api.openweathermap.org/data/2.5/weather"
+    params = {
+        'lat': GEG_LAT,
+        'lon': GEG_LON,
+        'appid': OPENWEATHER_API_KEY,
+        'units': 'imperial' # Fahrenheit
+    }
+    
     try:
-        response = requests.get("https://wttr.in/GEG?format=%C+%t")
-        return response.text.strip()
-    except:
+        response = requests.get(url, params=params, timeout=5)
+        response.raise_for_status() 
+        data = response.json()
+        
+        temp = round(data['main']['temp'])
+        description = data['weather'][0]['description'].title()
+        
+        return f"{description} {temp}°F"
+        
+    except RequestException as e:
+        logging.error(f"OpenWeatherMap API request failed: {e}")
         return "Weather unavailable"
 
+# --- AVIATIONSTACK DATA FETCHING ---
 def get_flight_data(mode='departure'):
     global flight_cache
     cached = flight_cache[mode + 's']
@@ -119,15 +133,12 @@ def process_data_into_df():
     arrs = get_flight_data('arrival')
     
     all_flights = []
-    
-    # Get Current Time in Spokane
     now_spokane = datetime.now(SPOKANE_TZ)
     
     def parse_and_convert(time_str):
         if not time_str: return None
-        # 1. Parse API time (which is UTC)
+        # Parse UTC time and convert to Spokane Time
         dt_utc = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
-        # 2. Convert to Spokane Time
         return dt_utc.astimezone(SPOKANE_TZ)
 
     def get_zone(flight):
@@ -151,10 +162,26 @@ def process_data_into_df():
     if not all_flights: return pd.DataFrame()
     
     df = pd.DataFrame(all_flights)
-    # Double check filter (Next 24h only)
     df = df[df['time'] <= now_spokane + timedelta(hours=24)]
     df['hour'] = df['time'].dt.hour
     return df
+
+# --- COMMAND HANDLERS ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🚖 **GEG Pro Driver Assistant v6.0**\n\n"
+        "commands:\n"
+        "/status - 🚦 Strategy, Weather & Best Shifts\n"
+        "/graph - 📊 Demand Chart\n"
+        "/arrivals - 🛬 Pickups (Live)\n"
+        "/departures - 🛫 Drop-offs (Live)\n"
+        "/navigate - 🗺️ GPS to TNC Lot"
+    )
+
+async def navigate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[InlineKeyboardButton("🗺️ Open Google Maps (Waiting Lot)", url=TNC_LOT_MAP_URL)]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Tap below to start navigation:", reply_markup=reply_markup)
 
 async def send_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text("🎨 Syncing with Spokane time...")
@@ -167,7 +194,6 @@ async def send_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for col in ['Arrival', 'Departure']:
         if col not in hourly.columns: hourly[col] = 0
 
-    # Sort index to ensure graph goes from Now -> Later
     hourly = hourly.sort_index()
 
     plt.figure(figsize=(10, 6))
@@ -176,31 +202,31 @@ async def send_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
     plt.title('GEG Real-Time Demand (Pacific Time)')
     plt.xlabel('Hour of Day')
     plt.ylabel('Est. Rides')
+    plt.xticks(range(0, 24))
     plt.legend()
     plt.grid(axis='y', linestyle='--', alpha=0.7)
     
     buf = io.BytesIO()
     plt.savefig(buf, format='png')
-    buf.seek(0)
     plt.close()
+    buf.seek(0)
     await update.message.reply_photo(photo=buf, caption="📊 **Live Demand (Pacific Time)**")
     await status_msg.delete()
 
 async def driver_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     weather = get_weather()
     df = process_data_into_df()
+    
     if df.empty: 
-        await update.message.reply_text("No upcoming flights found.")
+        await update.message.reply_text(f"🌤 **Weather:** {weather}\nNo upcoming flights found.")
         return
     
-    now_hour = datetime.now(SPOKANE_TZ).hour
-    # Look at next 3 hours relative to spokane time
-    next_3 = df[df['time'] <= datetime.now(SPOKANE_TZ) + timedelta(hours=3)]
+    now_spokane = datetime.now(SPOKANE_TZ)
+    next_3 = df[df['time'] <= now_spokane + timedelta(hours=3)]
     arr = len(next_3[next_3['type'] == 'Arrival'])
     
     msg = "🔥 **HIGH SURGE LIKELY**" if arr >= 6 else "✅ **MODERATE**" if arr >= 3 else "💤 **LOW DEMAND**"
 
-    # Best Shift Logic
     if not df[df['type'] == 'Arrival'].empty:
         arr_hourly = df[df['type'] == 'Arrival'].groupby('hour').size()
         top_hours = arr_hourly.nlargest(3).index.tolist()
@@ -214,7 +240,7 @@ async def driver_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"🌤 **Weather:** {weather}\n"
-        f"⌚ **Spokane Time:** {datetime.now(SPOKANE_TZ).strftime('%H:%M')}\n"
+        f"⌚ **Spokane Time:** {now_spokane.strftime('%H:%M')}\n"
         f"🚦 **Next 3 Hours:** {arr} Arrivals\n"
         f"{msg}\n\n"
         f"💰 **Best Times Today:** {best_shift_str}",
@@ -235,11 +261,9 @@ async def check_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = 'departure' if 'departures' in update.message.text else 'arrival'
     
-    # 1. Get raw data
     flights = get_flight_data(mode)
     if not flights: return await update.message.reply_text("No data currently available.")
     
-    # 2. Process & Filter in Real-Time
     valid = []
     now_spokane = datetime.now(SPOKANE_TZ)
     
@@ -247,15 +271,12 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if f[mode]['scheduled'] and f.get('airline'):
             zone = PASSENGER_AIRLINES.get(f['airline'].get('iata'))
             if zone:
-                # Convert to Pacific Time
                 dt_utc = datetime.fromisoformat(f[mode]['scheduled'].replace('Z', '+00:00'))
                 dt_local = dt_utc.astimezone(SPOKANE_TZ)
                 
-                # STRICT FILTER: Is this flight in the future?
                 if dt_local > now_spokane:
                     valid.append({'data': f, 'zone': zone, 'time': dt_local})
     
-    # 3. Sort by Time
     valid.sort(key=lambda x: x['time'])
     
     title = "Incoming Pickups" if mode == 'arrival' else "Departing Drop-offs"
@@ -276,7 +297,6 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
         time_str = dt.strftime('%H:%M')
         
         if mode == 'arrival':
-            # Check for clusters (within 20 mins)
             if last_time and (dt - last_time < timedelta(minutes=20)):
                 cluster_count += 1
             else:
@@ -302,6 +322,7 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_text(msg, parse_mode='Markdown')
 
+# --- MAIN EXECUTION ---
 if __name__ == '__main__':
     keep_alive()
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
