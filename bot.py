@@ -10,16 +10,16 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 OPENSKY_USERNAME = os.environ.get("OPENSKY_USERNAME")
 OPENSKY_PASSWORD = os.environ.get("OPENSKY_PASSWORD")
 PORT = int(os.environ.get("PORT", 8000))  # Render assigns this automatically
-APP_URL = os.environ.get("APP_URL")  # Your Render app HTTPS URL (e.g., https://mygegflightbot.onrender.com)
+APP_URL = "https://gegflightbot.onrender.com"  # Your Render app URL
 
 if not all([TELEGRAM_TOKEN, OPENSKY_USERNAME, OPENSKY_PASSWORD, APP_URL]):
-    raise ValueError("Set TELEGRAM_TOKEN, OPENSKY_USERNAME, OPENSKY_PASSWORD, and APP_URL as environment variables.")
+    raise ValueError("Set TELEGRAM_TOKEN, OPENSKY_USERNAME, OPENSKY_PASSWORD, and APP_URL.")
 
 # --------- Flight Data Functions ---------
 def get_departures(hours_back=24):
     """Fetch departures from GEG in the past X hours."""
     end_time = int(time.time())
-    begin_time = end_time - hours_back*3600
+    begin_time = end_time - hours_back * 3600
     url = f"https://opensky-network.org/api/flights/departure?airport=GEG&begin={begin_time}&end={end_time}"
     try:
         response = requests.get(url, auth=(OPENSKY_USERNAME, OPENSKY_PASSWORD))
@@ -39,7 +39,7 @@ def get_departures(hours_back=24):
 def get_upcoming_departures(hours_ahead=12):
     """Fetch upcoming departures from GEG for next X hours."""
     now = int(time.time())
-    future = now + hours_ahead*3600
+    future = now + hours_ahead * 3600
     url = f"https://opensky-network.org/api/flights/departure?airport=GEG&begin={now}&end={future}"
     try:
         response = requests.get(url, auth=(OPENSKY_USERNAME, OPENSKY_PASSWORD))
@@ -67,7 +67,7 @@ def departures_by_hour(df):
 
 def predict_peak_hours(days=7):
     now = int(time.time())
-    begin = now - days*24*3600
+    begin = now - days * 24 * 3600
     end = now
     url = f"https://opensky-network.org/api/flights/departure?airport=GEG&begin={begin}&end={end}"
     try:
@@ -128,12 +128,9 @@ def main():
     app.add_handler(CommandHandler("upcoming", upcoming))
     app.add_handler(CommandHandler("predict", predict))
     
-    # Set webhook
-    webhook_path = f"/{TELEGRAM_TOKEN}"
-    
     print(f"🚀 GEGFlightBot started on webhook {APP_URL}/{TELEGRAM_TOKEN}")
     
-    # Run webhook
+    # Run webhook (PTB will handle HTTPS automatically)
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
