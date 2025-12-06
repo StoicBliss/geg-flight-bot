@@ -1,50 +1,28 @@
 import os
-import logging
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import asyncio
+from fastapi import FastAPI
+import uvicorn
+from telegram.ext import ApplicationBuilder
 
-# ------------------ Configuration ------------------
-
-# Fetch credentials from environment variables
+# Telegram bot setup
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-OPENSKY_USERNAME = os.environ.get("OPENSKY_USERNAME")
-OPENSKY_PASSWORD = os.environ.get("OPENSKY_PASSWORD")
-AIRPORT_ICAO = os.environ.get("AIRPORT_ICAO", "KJFK")  # default example
+application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-# Validate critical variables
-if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN environment variable is not set!")
-if not OPENSKY_USERNAME or not OPENSKY_PASSWORD:
-    raise ValueError("OpenSky credentials are not set!")
-if not AIRPORT_ICAO:
-    raise ValueError("AIRPORT_ICAO environment variable is not set!")
+# Start Telegram polling in the background
+async def start_bot():
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
 
-# ------------------ Logging ------------------
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+asyncio.create_task(start_bot())
 
-logger = logging.getLogger(__name__)
+# Minimal FastAPI app just to bind a port
+app = FastAPI()
 
-# ------------------ Command Handlers ------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hello! Flight bot is online ✈️")
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("/start - Start the bot\n/help - Show this message")
-
-# ------------------ Main ------------------
-def main():
-    # Build the bot application
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    # Register command handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-
-    # Start the bot with polling
-    app.run_polling()
+@app.get("/")
+def root():
+    return {"status": "bot running"}
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 10000))  # Render sets PORT automatically
+    uvicorn.run(app, host="0.0.0.0", port=port)
