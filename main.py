@@ -7,8 +7,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 import logging
 from flask import Flask
 import threading
@@ -18,9 +18,7 @@ AVIATIONSTACK_API_KEY = os.getenv("AVIATION_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 AIRPORT_IATA = 'GEG'
 
-# --- PASSENGER AIRLINE & TERMINAL LOGIC ---
-# Concourse A/B (South): Delta, United, Southwest, American
-# Concourse C (North): Alaska, American (sometimes), Allegiant
+# --- CONSTANTS ---
 PASSENGER_AIRLINES = {
     'AS': 'Zone C (Alaska)', 
     'G4': 'Zone C (Allegiant)',
@@ -32,7 +30,10 @@ PASSENGER_AIRLINES = {
     'SY': 'Zone A/B (Sun Country)'
 }
 
-# --- FLASK KEEP-ALIVE SERVER (For Render) ---
+# Link to GEG TNC Waiting Lot (Coordinates)
+TNC_LOT_MAP_URL = "https://www.google.com/maps/search/?api=1&query=47.621980,-117.533850"
+
+# --- FLASK KEEP-ALIVE ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -48,7 +49,7 @@ def keep_alive():
     t.daemon = True
     t.start()
 
-# --- CACHING SETUP ---
+# --- CACHING ---
 flight_cache = {
     'departures': {'data': None, 'timestamp': None},
     'arrivals': {'data': None, 'timestamp': None}
@@ -62,19 +63,24 @@ logging.basicConfig(
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚖 **GEG Pro Driver Assistant**\n\n"
+        "🚖 **GEG Pro Driver Assistant v4.0**\n\n"
         "commands:\n"
-        "/graph - 📊 Demand Chart (Green=Pickups)\n"
-        "/status - 🚦 Strategy & Weather\n"
-        "/arrivals - 🛬 Next Pickups (w/ Zones)\n"
-        "/departures - 🛫 Next Drop-offs\n"
+        "/status - 🚦 Strategy, Weather & Best Shifts\n"
+        "/graph - 📊 Demand Chart\n"
+        "/arrivals - 🛬 Pickups (w/ Surge Clusters)\n"
+        "/departures - 🛫 Drop-offs\n"
+        "/navigate - 🗺️ GPS to TNC Lot\n"
         "/delays - ⚠️ Delay Watch"
     )
 
+async def navigate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends a button to open Google Maps."""
+    keyboard = [[InlineKeyboardButton("🗺️ Open Google Maps (TNC Lot)", url=TNC_LOT_MAP_URL)]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Tap below to start navigation:", reply_markup=reply_markup)
+
 def get_weather():
-    """Fetches simple weather for GEG without API key using wttr.in"""
     try:
-        # Returns: "Clear +10°C"
         response = requests.get("https://wttr.in/GEG?format=%C+%t")
         return response.text.strip()
     except:
@@ -167,6 +173,39 @@ async def send_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_photo(photo=buf, caption="📊 **Green** = Pickups | **Red** = Dropoffs")
     await status_msg.delete()
 
+async def driver_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    weather = get_weather()
+    df = process_data_into_df()
+    if df.empty: return
+    
+    # 1. Current Status (Next 3h)
+    now_hour = datetime.now().hour
+    next_3 = df[(df['hour'] >= now_hour) & (df['hour'] <= now_hour + 3)]
+    arr = len(next_3[(next_3['type'] == 'Arrival')])
+    
+    msg = ""
+    if arr >= 6: msg = "🔥 **HIGH SURGE LIKELY**"
+    elif arr >= 3: msg = "✅ **MODERATE DEMAND**"
+    else: msg = "💤 **LOW DEMAND**"
+
+    # 2. Best Shift Logic (Find top 3 busiest hours)
+    arr_hourly = df[df['type'] == 'Arrival'].groupby('hour').size()
+    top_hours = arr_hourly.nlargest(3).index.tolist()
+    top_hours.sort()
+    best_shift_str = ", ".join([f"{h}:00" for h in top_hours])
+
+    # 3. Navigation Button
+    keyboard = [[InlineKeyboardButton("🗺️ Nav to Waiting Lot", url=TNC_LOT_MAP_URL)]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        f"🌤 **Weather:** {weather}\n"
+        f"🚦 **Current Status:** {arr} Arrivals (Next 3h)\n"
+        f"{msg}\n\n"
+        f"💰 **Best Times Today:** {best_shift_str}",
+        reply_markup=reply_markup
+    )
+
 async def check_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
     df = process_data_into_df()
     if df.empty: return await update.message.reply_text("No data.")
@@ -176,34 +215,6 @@ async def check_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = "⚠️ **PASSENGER DELAYS**\n"
         for _, row in delays.iterrows(): msg += f"{row['time'].strftime('%H:%M')} - {row['status'].upper()} ({row['zone']})\n"
         await update.message.reply_text(msg)
-
-async def driver_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    weather = get_weather()
-    df = process_data_into_df()
-    if df.empty: return
-    
-    now_hour = datetime.now().hour
-    next_3 = df[(df['hour'] >= now_hour) & (df['hour'] <= now_hour + 3)]
-    
-    arr_c = len(next_3[(next_3['type'] == 'Arrival') & (next_3['zone'].str.contains('Zone C'))])
-    arr_ab = len(next_3[(next_3['type'] == 'Arrival') & (next_3['zone'].str.contains('Zone A/B'))])
-    total = arr_c + arr_ab
-    
-    msg = ""
-    if total >= 5: msg = "🔥 **HIGH SURGE LIKELY**"
-    elif total >= 3: msg = "✅ **MODERATE DEMAND**"
-    else: msg = "💤 **LOW DEMAND**"
-    
-    strategy = "Sit in TNC Lot."
-    if arr_c > arr_ab: strategy = "Expect **ALASKA** rush (North Zone C)."
-    elif arr_ab > arr_c: strategy = "Expect **DELTA/UNITED** rush (South Zone A/B)."
-
-    await update.message.reply_text(
-        f"🌤 **Weather:** {weather}\n"
-        f"🚦 **Next 3 Hours:** {total} Arrivals\n\n"
-        f"{msg}\n"
-        f"💡 **Tip:** {strategy}"
-    )
 
 async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = 'departure' if 'departures' in update.message.text else 'arrival'
@@ -222,10 +233,10 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = "Incoming Pickups" if mode == 'arrival' else "Departing Drop-offs"
     msg = f"**{title}**\n\n"
     
-    count = 0
-    for item in valid:
-        if count >= 10: break
-        
+    last_time = None
+    cluster_count = 0
+    
+    for item in valid[:12]:
         f = item['data']
         zone_raw = item['zone']
         
@@ -237,7 +248,20 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dt = datetime.fromisoformat(raw_time.replace('Z', '+00:00'))
         time_str = dt.strftime('%H:%M')
         
+        # --- SURGE CLUSTER LOGIC (Arrivals Only) ---
         if mode == 'arrival':
+            # If this flight is within 20 mins of the last one, it's a cluster
+            if last_time and (dt - last_time < timedelta(minutes=20)):
+                cluster_count += 1
+            else:
+                cluster_count = 1 
+            
+            # If we hit 3 flights in a row closely packed, insert alert
+            if cluster_count == 3:
+                 msg += "⚡️ **SURGE CLUSTER DETECTED** ⚡️\n\n"
+
+            last_time = dt
+            
             curbside_time = dt + timedelta(minutes=20)
             curbside_str = curbside_time.strftime('%H:%M')
             simple_zone = zone_raw.split('(')[0].strip()
@@ -245,10 +269,9 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"**{airline_name}** ({flight_num})\n"
             msg += f"Touchdown: `{time_str}` | Ready: `{curbside_str}`\n"
             msg += f"Location: {simple_zone}\n\n"
+            
         else:
             msg += f"`{time_str}` • **{airline_name}** ({flight_num})\n"
-        
-        count += 1
         
     await update.message.reply_text(msg, parse_mode='Markdown')
 
@@ -261,4 +284,5 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('status', driver_status))
     application.add_handler(CommandHandler('departures', list_flights))
     application.add_handler(CommandHandler('arrivals', list_flights))
+    application.add_handler(CommandHandler('navigate', navigate))
     application.run_polling()
