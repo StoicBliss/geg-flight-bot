@@ -1,6 +1,0 @@
-python-telegram-bot
-requests
-pandas
-matplotlib
-flask
-pytz
