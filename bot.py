@@ -4,9 +4,8 @@ import requests
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta, timezone
-from collections import Counter, defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 
 # --- CONFIGURATION ---
 AVIATIONSTACK_KEY = os.environ.get("AVIATIONSTACK_KEY")
@@ -18,25 +17,34 @@ GEG_LAT = "47.619"
 GEG_LON = "-117.535"
 
 # --- RIDESHARE INTELLIGENCE ---
-# Known cargo/private airlines to filter out (Bogus Info Filter)
-CARGO_AIRLINES = ["FedEx", "UPS", "Empire Airlines", "Ameriflight", "Corporate Air", "Alpine Air"]
+CARGO_AIRLINES = ["FedEx", "UPS", "Empire", "Ameriflight", "Corporate Air", "Alpine"]
 
-# Seat estimates for GEG aircraft
+# Terminal Logic: GEG has "North (C)" and "South (A/B)"
+TERMINAL_MAP = {
+    'Alaska Airlines': 'Zone C (North)',
+    'American Airlines': 'Zone C (North)',
+    'Frontier Airlines': 'Zone C (North)',
+    'Delta Air Lines': 'Zone A/B (South)',
+    'United Airlines': 'Zone A/B (South)',
+    'Southwest Airlines': 'Zone A/B (South)',
+    'Allegiant Air': 'Zone A/B (South)',
+    'Sun Country Airlines': 'Zone A/B (South)'
+}
+
+# Seat Estimates
 AIRCRAFT_SEATS = {
-    'B737': 160, 'B738': 175, 'B739': 179, 'B38M': 178, # Boeings
-    'A320': 150, 'A319': 128, 'A321': 190,              # Airbus
-    'E75L': 76, 'E175': 76, 'CRJ7': 70, 'CRJ9': 76,     # Regional (Horizon/SkyWest)
-    'DH8D': 76, 'Q400': 76                              # Props
+    'B737': 160, 'B738': 175, 'B739': 179, 'B38M': 178,
+    'A320': 150, 'A319': 128, 'A321': 190,
+    'E75L': 76, 'E175': 76, 'CRJ7': 70, 'CRJ9': 76,
+    'DH8D': 76, 'Q400': 76
 }
 DEFAULT_SEATS = 100
 
-# --- CACHE STORAGE ---
-# FIXED: Keys now match the singular 'mode' arguments used in functions
+# --- STORAGE (Memory) ---
 cache = {
     'departure': {'data': [], 'timestamp': None},
     'arrival': {'data': [], 'timestamp': None}
 }
-CACHE_DURATION_MINUTES = 30
 
 # --- LOGGING ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -64,12 +72,12 @@ def get_weather():
     try:
         url = f"https://api.openweathermap.org/data/2.5/weather?lat={GEG_LAT}&lon={GEG_LON}&appid={OPENWEATHER_KEY}&units=imperial"
         res = requests.get(url).json()
-        if res.get('cod') != 200: return "Weather unavailable."
+        if res.get('cod') != 200: return "N/A"
         return f"{res['main']['temp']:.0f}°F, {res['weather'][0]['main']}"
     except:
         return "N/A"
 
-def fetch_flights(mode='departure'):
+def fetch_flights(mode):
     try:
         url = "http://api.aviationstack.com/v1/flights"
         params = {
@@ -77,176 +85,181 @@ def fetch_flights(mode='departure'):
             f'{mode}_iata': 'GEG',
             'limit': 100
         }
-        # Fetching all statuses to catch delays/cancellations
         response = requests.get(url, params=params)
         data = response.json()
-        
         if 'error' in data:
             logging.error(f"API Error: {data['error']}")
-            return []
-            
+            return None
         return data.get('data', [])
     except Exception as e:
         logging.error(f"API Request Failed: {e}")
-        return []
+        return None
 
-def get_cached_flights(mode):
-    # FIXED: Using timezone-aware UTC to prevent deprecation warnings
-    now = datetime.now(timezone.utc)
-    
-    # Check if cache is empty or expired
-    if (cache[mode]['timestamp'] is None or 
-        (now - cache[mode]['timestamp']) > timedelta(minutes=CACHE_DURATION_MINUTES)):
-        
-        logging.info(f"Refreshing {mode} cache from API...")
-        flights = fetch_flights(mode)
-        
-        # Only update cache if we actually got data back
-        if flights: 
-            cache[mode] = {'data': flights, 'timestamp': now}
-        elif not cache[mode]['data']: 
-            logging.warning(f"API returned no data for {mode} and cache is empty.")
-            
-    return cache[mode]['data']
-
-def process_flight_data(raw_flights, mode):
-    valid_flights = []
-    pax_volume = defaultdict(int)
-    
-    # FIXED: Time filtering buffer (20 mins in past)
+def process_data(raw_data, mode):
+    valid = []
+    pax_total = 0
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    threshold = now_utc - timedelta(minutes=20)
+    # Filter Buffer: Keep flights from 30 mins ago onwards
+    threshold = now_utc - timedelta(minutes=30)
+    
+    if not raw_data: return [], 0
 
-    for f in raw_flights:
+    for f in raw_data:
         try:
-            # 1. Parse Time
+            # Time Parsing
             time_str = f[mode]['scheduled']
-            # Convert ISO format to naive datetime for comparison
             dt = datetime.fromisoformat(time_str.replace('Z', '+00:00')).replace(tzinfo=None)
             
-            # Filter: Skip old flights
             if dt < threshold: continue
 
-            # 2. Extract Details
-            status = f.get('flight_status', 'scheduled')
+            # Extract Data
             airline = f.get('airline', {}).get('name', 'Unknown')
+            status = f.get('flight_status', 'scheduled')
             
-            # --- AUTHENTICITY FILTER ---
-            # Remove Cargo/Logistics flights
-            if any(cargo in airline for cargo in CARGO_AIRLINES):
-                continue
+            # Cargo Filter
+            if any(c in airline for c in CARGO_AIRLINES): continue
             
-            # 3. Estimate Passengers
-            iata_code = "Unknown"
-            if f.get('aircraft'):
-                iata_code = f['aircraft'].get('iata', 'Unknown')
-            seats = AIRCRAFT_SEATS.get(iata_code, DEFAULT_SEATS)
+            # Flight Number (New Feature)
+            flight_num = f.get('flight', {}).get('iata', 'Unknown')
+            
+            # Seat Est
+            iata = f.get('aircraft', {}).get('iata', 'Unknown') if f.get('aircraft') else 'Unknown'
+            seats = AIRCRAFT_SEATS.get(iata, DEFAULT_SEATS)
+            
+            # Terminal Logic
+            zone = TERMINAL_MAP.get(airline, "Other")
 
-            # 4. Status Icons
-            icon = "🟢" 
+            # Icons
+            icon = "🟢"
             if status == 'cancelled': icon = "⚫ (CXLD)"
             elif status == 'delayed': icon = "🔴 (DLYD)"
             elif status == 'landed': icon = "🛬"
-            elif status == 'active': icon = "✈️"
-
-            # 5. Build Object
-            valid_flights.append({
+            
+            valid.append({
                 'time': dt,
                 'airline': airline,
-                'dest_origin': f['arrival']['airport'] if mode == 'departure' else f['departure']['airport'],
+                'flight_num': flight_num, # Added
+                'loc': f['arrival']['airport'] if mode == 'departure' else f['departure']['airport'],
                 'seats': seats,
-                'status_icon': icon,
-                'status_text': status
+                'icon': icon,
+                'zone': zone
             })
+            
+            if status != 'cancelled': pax_total += seats
+            
+        except: continue
+        
+    valid.sort(key=lambda x: x['time'])
+    return valid, pax_total
 
-            # 6. Aggregate Volume (ignore cancelled)
-            if status != 'cancelled':
-                pax_volume[dt.hour] += seats
+# --- BOT LOGIC ---
 
-        except (ValueError, TypeError, KeyError) as e:
-            continue
-
-    valid_flights.sort(key=lambda x: x['time'])
-    return valid_flights, pax_volume
-
-# --- COMMANDS ---
-
-async def send_dashboard(update: Update, mode):
-    # Retrieve raw data (singular key 'departure' or 'arrival')
-    raw = get_cached_flights(mode)
+async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE, mode=None):
+    # Determine mode (command vs button click)
+    query = update.callback_query
+    if query:
+        mode = query.data.split("_")[1]
+        await query.answer()
     
-    if not raw and cache[mode]['timestamp'] is None:
-        await update.message.reply_text("⚠️ **System Info:** No data in cache. Possible API limit reached or API downtime.")
-        return
-
-    flights, pax_volume = process_flight_data(raw, mode)
+    # 1. Check Cache Age
+    timestamp = cache[mode]['timestamp']
+    age_minutes = 999
+    if timestamp:
+        age_minutes = (datetime.now(timezone.utc) - timestamp).total_seconds() / 60
     
-    if not flights:
-        await update.message.reply_text("💤 No upcoming passenger flights found in the next few hours.")
-        return
+    # 2. Logic: If NO data, force fetch. If data exists, SHOW IT (don't auto-refresh)
+    raw = cache[mode]['data']
+    
+    if not raw and age_minutes > 60: # Initial Load or Stale
+        msg = await (query.message if query else update.message).reply_text("🔄 Initializing data...")
+        raw = fetch_flights(mode)
+        if raw is not None:
+            cache[mode] = {'data': raw, 'timestamp': datetime.now(timezone.utc)}
+            age_minutes = 0
+            if query: await msg.delete()
+        else:
+            await (query.message if query else update.message).reply_text("⚠️ API Error. Try again later.")
+            return
 
-    # --- BUILD THE DASHBOARD ---
+    # 3. Process
+    flights, total_pax = process_data(cache[mode]['data'], mode)
     weather = get_weather()
     
+    # 4. Traffic Light System
+    traffic = "🔴 QUIET"
+    if total_pax > 500: traffic = "🟢 BUSY (SURGE)"
+    elif total_pax > 250: traffic = "🟡 STEADY"
+
+    # 5. Build Message
     title = "🛫 DEPARTURES" if mode == 'departure' else "🛬 ARRIVALS"
-    msg = f"{title} | GEG | 🌡 {weather}\n"
-    msg += "──────────────────\n"
-
-    # Demand Forecast
-    msg += "💰 **DEMAND FORECAST (UTC)**\n"
-    sorted_hours = sorted(pax_volume.items())
+    text = f"{title} | 🌡 {weather}\n"
+    text += f"📊 Status: {traffic}\n"
+    text += f"🕒 Data Age: {int(age_minutes)} min ago\n"
+    text += "──────────────────\n"
     
-    # Show only the next 3 active hours to keep it readable
-    if sorted_hours:
-        for hour, count in sorted_hours[:3]:
-            fire = "🔥" if count > 350 else "⚡" if count > 150 else "💤"
-            msg += f"`{hour:02}:00` ➜ ~{count} Pax {fire}\n"
-    else:
-        msg += "Low passenger volume detected.\n"
-    
-    msg += "──────────────────\n"
-    msg += "🕒 **FLIGHT SCHEDULE**\n"
-
-    # Flight List (Top 12)
+    count = 0
     for f in flights[:12]:
-        time_display = f['time'].strftime("%H:%M")
-        msg += f"{f['status_icon']} `{time_display}` **{f['airline']}**\n"
-        # Truncate long airport names for mobile view
-        short_loc = (f['dest_origin'][:20] + '..') if len(f['dest_origin']) > 20 else f['dest_origin']
-        msg += f"   └ {short_loc} (~{f['seats']} pax)\n"
+        t_display = f['time'].strftime("%H:%M")
+        # Format: Icon Time Airline (Flight#) [Zone]
+        # Example: 🟢 14:00 Delta (DL123) [Zone A/B]
+        
+        # Shorten Zone for display
+        z_short = f['zone'].replace("Zone ", "").replace(" (North)", "N").replace(" (South)", "S")
+        
+        text += f"{f['icon']} `{t_display}` **{f['airline']}** ({f['flight_num']})\n"
+        text += f"   └ {f['loc'][:18]} [{z_short}] ~{f['seats']}p\n"
+        count += 1
+        
+    if count == 0: text += "💤 No passenger flights in this window.\n"
+        
+    text += "\n_Times in UTC. [CN]=North, [ABS]=South_"
 
-    msg += "\n_Times are UTC. Verify delays below._"
+    # 6. Buttons
+    keyboard = [
+        [InlineKeyboardButton(f"🔄 REFRESH {mode.upper()} (Spend Credit)", callback_data=f"refresh_{mode}")],
+        [InlineKeyboardButton("🔍 Verify on GEG Site", url="https://spokaneairports.net/flight-status")]
+    ]
     
-    # Official Cross-Match Link
-    kb = [[InlineKeyboardButton("🔍 Verify on GEG Official Site", url="https://spokaneairports.net/flight-status")]]
+    if query:
+        await query.message.edit_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def refresh_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    mode = query.data.split("_")[1]
     
-    await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+    # Force Fetch
+    raw = fetch_flights(mode)
+    if raw:
+        cache[mode] = {'data': raw, 'timestamp': datetime.now(timezone.utc)}
+        await dashboard(update, context, mode)
+    else:
+        await query.answer("Failed to refresh. Check API limit.", show_alert=True)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚕 **GEG Driver Pro v3**\n\n"
-        "Commands:\n"
-        "/arrivals - See incoming demand (Surge Detector)\n"
-        "/departures - See drop-off opportunities\n\n"
-        "_Data cached for 30m. Cargo flights hidden._"
+        "🚕 **GEG Driver Pro v4.1**\n\n"
+        "/arrivals - Incoming + Flight #'s\n"
+        "/departures - Outgoing + Flight #'s\n"
+        "Tap 'Refresh' to update data."
     )
 
-async def departures(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_dashboard(update, 'departure')
+async def dep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await dashboard(update, context, 'departure')
 
-async def arrivals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_dashboard(update, 'arrival')
+async def arr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await dashboard(update, context, 'arrival')
 
-# --- MAIN ---
+# --- RUN ---
 if __name__ == '__main__':
-    # Start Dummy Server for Render
     threading.Thread(target=run_web_server, daemon=True).start()
-    
-    # Start Bot
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    
     app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('departures', departures))
-    app.add_handler(CommandHandler('arrivals', arrivals))
+    app.add_handler(CommandHandler('departures', dep_command))
+    app.add_handler(CommandHandler('arrivals', arr_command))
+    app.add_handler(CallbackQueryHandler(refresh_handler, pattern="^refresh_"))
     
     print("Bot is running...")
     app.run_polling()
