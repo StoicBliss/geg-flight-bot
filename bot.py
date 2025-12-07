@@ -16,7 +16,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "GEG Pro Bot (Explanation Feature) Online!"
+    return "GEG Pro Bot (Professional Start) Online!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
@@ -203,7 +203,29 @@ async def safe_edit(context, chat_id, msg_id, text, reply_markup=None):
 # --- BOT COMMANDS --- #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚘 <b>GEG Pro Driver Bot</b>\n/status, /arrivals, /departures, /delays", parse_mode='HTML')
+    # Time-based Greeting Logic
+    now = get_spokane_time()
+    hour = now.hour
+    
+    if 5 <= hour < 12:
+        greeting = "Good morning"
+    elif 12 <= hour < 18:
+        greeting = "Good afternoon"
+    else:
+        greeting = "Good evening"
+
+    message = (
+        f"👋 <b>{greeting}, Driver.</b>\n\n"
+        "Welcome to the <b>GEG Airport Pro Assistant</b>. "
+        "I am here to help you track passenger demand and maximize your earnings.\n\n"
+        "<b>📋 Dashboard Commands</b>\n"
+        "<code>/status</code>     - Check current demand strategy & weather.\n"
+        "<code>/arrivals</code>   - View upcoming passenger arrival board.\n"
+        "<code>/departures</code> - View upcoming passenger departure board.\n"
+        "<code>/delays</code>     - Monitor delayed (>15m) or cancelled flights."
+    )
+    
+    await update.message.reply_text(message, parse_mode='HTML')
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("📡 Analyzing...")
@@ -250,14 +272,12 @@ async def show_arrivals(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_icon = "⚠️ " if "Delayed" in f['status'] else ("🔴 " if "CANCELLED" in f['status'] else "")
         airline_safe = html.escape(f['airline'])
         
-        # Check if we need to show the explanation footer
         if "Check Screen" in f['zone']:
             has_check_screen = True
         
         line = f"{status_icon}{f['time_str']} | {airline_safe} | {f['code']}{f['num']} | {pickup} | {f['zone']}\n"
         text += line
     
-    # Append explanation if needed
     if has_check_screen:
         text += CHECK_SCREEN_EXPLANATION
     
