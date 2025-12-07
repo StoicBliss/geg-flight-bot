@@ -3,7 +3,7 @@ import os
 import requests
 import threading
 import time
-import html
+import html  # Essential for sanitizing text
 from flask import Flask 
 from datetime import datetime, timedelta
 import pytz
@@ -11,12 +11,12 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
 from telegram.error import BadRequest
 
-# --- WEB SERVER --- #
+# --- WEB SERVER (KEEPS BOT ALIVE) --- #
 app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "GEG Pro Bot (Professional Start) Online!"
+    return "GEG Pro Bot (QA Certified) Online!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
@@ -102,6 +102,7 @@ def fetch_flights(mode):
     params = {
         'api_key': AIRLABS_API_KEY,
         'arr_iata' if mode == 'arrival' else 'dep_iata': AIRPORT_IATA
+        # LIMIT REMOVED per QA to capture full day
     }
 
     try:
@@ -120,6 +121,7 @@ def fetch_flights(mode):
                 
                 if not code or not num: continue
 
+                # --- FILTERS ---
                 if f.get('cs_flight_number'): continue
                 
                 uid = f"{code}{num}"
@@ -128,6 +130,7 @@ def fetch_flights(mode):
 
                 if code in ['FX', '5X', 'PO', 'K4', 'QY', 'ABX', 'ATI']: continue 
 
+                # --- TIMING ---
                 sched_str = f.get('arr_time') if mode == 'arrival' else f.get('dep_time')
                 est_str = f.get('arr_estimated') if mode == 'arrival' else f.get('dep_estimated')
                 
@@ -146,6 +149,7 @@ def fetch_flights(mode):
 
                 delay_mins = int((final_local - sched_local).total_seconds() / 60)
                 
+                # --- STATUS ---
                 api_status = f.get('status', '').lower()
                 status_display = ""
                 
@@ -154,6 +158,7 @@ def fetch_flights(mode):
                 elif delay_mins > 15:
                     status_display = f"⚠️ Delayed {delay_mins}m"
                 
+                # --- ZONE ---
                 api_term = f.get('arr_terminal') if mode == 'arrival' else f.get('dep_terminal')
                 zone = "Check Screen"
                 if api_term:
@@ -203,7 +208,6 @@ async def safe_edit(context, chat_id, msg_id, text, reply_markup=None):
 # --- BOT COMMANDS --- #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Time-based Greeting Logic
     now = get_spokane_time()
     hour = now.hour
     
@@ -231,6 +235,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("📡 Analyzing...")
     try:
         temp, weather = get_weather()
+        # QA FIX: Sanitize weather string to prevent HTML crash
+        weather_safe = html.escape(str(weather)) if weather else "Unavailable"
+        
         flights = fetch_flights('arrival')
         now = get_spokane_time()
         
@@ -243,10 +250,11 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if weather and ("Rain" in weather or "Snow" in weather): strategy += " (Surge Likely)"
         
         text = (f"📊 <b>STATUS: {now.strftime('%I:%M %p')}</b>\n"
-                f"🌡️ {temp}°F, {weather}\n"
+                f"🌡️ {temp}°F, {weather_safe}\n"
                 f"🛬 Inbound (1hr): {count} planes\n"
                 f"🚦 {strategy}")
 
+        # QA FIX: Correct Google Maps Universal Link
         map_url = "https://www.google.com/maps/search/?api=1&query=Spokane+International+Airport+Cell+Phone+Waiting+Lot"
         keyboard = [[InlineKeyboardButton("🗺️ Nav to Waiting Lot", url=map_url)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -317,6 +325,7 @@ async def show_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dep = fetch_flights('departure')
     
     problems = []
+    # Use .copy() to avoid cache corruption
     for f in arr:
         if f['is_problem']: 
             p = f.copy()
