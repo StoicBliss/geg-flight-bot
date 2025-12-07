@@ -220,7 +220,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = (
         f"👋 <b>{greeting}, Driver.</b>\n\n"
-        "Welcome to the <b>GEG Airport Pro Assistant</b>. "
+        "Welcome to the <b>GEG Flight Tracker</b>. "
         "I am here to help you track passenger demand and maximize your earnings.\n\n"
         "<b>📋 Dashboard Commands</b>\n"
         "<code>/status</code>     - Check current demand strategy & weather.\n"
