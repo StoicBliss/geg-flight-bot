@@ -3,6 +3,7 @@ import os
 import requests
 import threading
 import time
+import html  # <--- Added for proper HTML sanitization
 from flask import Flask 
 from datetime import datetime, timedelta
 import pytz
@@ -10,12 +11,12 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
 from telegram.error import BadRequest
 
-# --- WEB SERVER --- #
+# --- WEB SERVER (KEEPS BOT ALIVE) --- #
 app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "GEG Pro Bot (HTML Edition) Online!"
+    return "GEG Pro Bot (Final Stable) Online!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
@@ -89,10 +90,11 @@ def fetch_flights(mode):
 
     logger.info(f"Fetching {mode} from AirLabs...")
     base_url = "https://airlabs.co/api/v9/schedules"
+    
     params = {
         'api_key': AIRLABS_API_KEY,
-        'arr_iata' if mode == 'arrival' else 'dep_iata': AIRPORT_IATA,
-        'limit': 50 
+        'arr_iata' if mode == 'arrival' else 'dep_iata': AIRPORT_IATA
+        # LIMIT REMOVED: Fetches max available for the day
     }
 
     try:
@@ -111,12 +113,19 @@ def fetch_flights(mode):
                 
                 if not code or not num: continue
 
+                # --- FILTERS ---
+                # 1. Skip Codeshares (Marketing duplicates)
+                if f.get('cs_flight_number'): continue
+                
+                # 2. Skip Exact Duplicates
                 uid = f"{code}{num}"
                 if uid in seen_flights: continue
                 seen_flights.add(uid)
+
+                # 3. Skip Cargo
                 if code in ['FX', '5X', 'PO', 'K4', 'QY', 'ABX', 'ATI']: continue 
 
-                # Timing
+                # --- TIMING ---
                 sched_str = f.get('arr_time') if mode == 'arrival' else f.get('dep_time')
                 est_str = f.get('arr_estimated') if mode == 'arrival' else f.get('dep_estimated')
                 
@@ -135,7 +144,7 @@ def fetch_flights(mode):
 
                 delay_mins = int((final_local - sched_local).total_seconds() / 60)
                 
-                # Status Logic
+                # --- STATUS ---
                 api_status = f.get('status', '').lower()
                 status_display = ""
                 
@@ -144,7 +153,7 @@ def fetch_flights(mode):
                 elif delay_mins > 15:
                     status_display = f"⚠️ Delayed {delay_mins}m"
                 
-                # Zone Logic
+                # --- ZONE ---
                 api_term = f.get('arr_terminal') if mode == 'arrival' else f.get('dep_terminal')
                 zone = "Check Screen"
                 if api_term:
@@ -160,7 +169,7 @@ def fetch_flights(mode):
                     'time': final_local,
                     'time_str': final_local.strftime('%H:%M'),
                     'zone': zone,
-                    'status': status_display,
+                    'status': status_display, 
                     'is_problem': (api_status == 'cancelled' or delay_mins > 15)
                 })
             except Exception:
@@ -182,7 +191,7 @@ async def safe_edit(context, chat_id, msg_id, text, reply_markup=None):
             chat_id=chat_id, 
             message_id=msg_id, 
             text=text, 
-            parse_mode='HTML',  # <--- CRITICAL FIX: HTML MODE ENABLED
+            parse_mode='HTML', 
             reply_markup=reply_markup,
             disable_web_page_preview=True
         )
@@ -216,7 +225,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🛬 Inbound (1hr): {count} planes\n"
                 f"🚦 {strategy}")
 
-        # Nav Button
+        # Corrected Google Maps Link for precise navigation
         map_url = "https://www.google.com/maps/search/?api=1&query=Spokane+International+Airport+Cell+Phone+Waiting+Lot"
         keyboard = [[InlineKeyboardButton("🗺️ Nav to Waiting Lot", url=map_url)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -238,10 +247,12 @@ async def show_arrivals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     for f in flights[:15]:
         pickup = (f['time'] + timedelta(minutes=20)).strftime('%H:%M')
-        status_icon = "⚠️" if "Delayed" in f['status'] else ("🔴" if "CANCELLED" in f['status'] else "")
+        status_icon = "⚠️ " if "Delayed" in f['status'] else ("🔴 " if "CANCELLED" in f['status'] else "")
         
-        # Use <pre> for cleaner columns if desired, but standard text is fine
-        line = f"{status_icon}{f['time_str']} | {f['airline']} | {f['code']}{f['num']} | {pickup} | {f['zone']}\n"
+        # Proper HTML Escaping
+        airline_safe = html.escape(f['airline'])
+        
+        line = f"{status_icon}{f['time_str']} | {airline_safe} | {f['code']}{f['num']} | {pickup} | {f['zone']}\n"
         text += line
     
     await safe_edit(context, update.effective_chat.id, msg.message_id, text)
@@ -258,8 +269,10 @@ async def show_departures(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += "-----------------------------------------\n"
     
     for f in flights[:15]:
-        status_icon = "⚠️" if "Delayed" in f['status'] else ("🔴" if "CANCELLED" in f['status'] else "")
-        line = f"{status_icon}{f['time_str']} | {f['airline']} | {f['code']}{f['num']} | {f['zone']}\n"
+        status_icon = "⚠️ " if "Delayed" in f['status'] else ("🔴 " if "CANCELLED" in f['status'] else "")
+        airline_safe = html.escape(f['airline'])
+        
+        line = f"{status_icon}{f['time_str']} | {airline_safe} | {f['code']}{f['num']} | {f['zone']}\n"
         text += line
     
     await safe_edit(context, update.effective_chat.id, msg.message_id, text)
@@ -270,14 +283,17 @@ async def show_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dep = fetch_flights('departure')
     
     problems = []
+    # Use .copy() to prevent cache mutation bugs
     for f in arr:
         if f['is_problem']: 
-            f['type'] = "🛬 Arr"
-            problems.append(f)
+            p = f.copy()
+            p['type'] = "🛬 Arr"
+            problems.append(p)
     for f in dep:
         if f['is_problem']: 
-            f['type'] = "🛫 Dep"
-            problems.append(f)
+            p = f.copy()
+            p['type'] = "🛫 Dep"
+            problems.append(p)
             
     problems.sort(key=lambda x: x['time'])
     
@@ -289,7 +305,8 @@ async def show_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += "-----------------------------------------\n"
     
     for f in problems[:20]:
-        line = f"{f['time_str']} | {f['type']} | {f['code']}{f['num']} | <b>{f['status']}</b>\n"
+        status_safe = html.escape(f['status'])
+        line = f"{f['time_str']} | {f['type']} | {f['code']}{f['num']} | <b>{status_safe}</b>\n"
         text += line
         
     await safe_edit(context, update.effective_chat.id, msg.message_id, text)
