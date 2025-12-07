@@ -1,6 +1,7 @@
 import os
+import io
 import requests
-from requests.exceptions import RequestException, HTTPError
+from requests.exceptions import RequestException
 import pandas as pd
 import matplotlib
 # Set backend to 'Agg' for headless servers (Render)
@@ -15,7 +16,7 @@ from flask import Flask
 import threading
 
 # --- CONFIGURATION ---
-RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
+AVIATIONSTACK_API_KEY = os.getenv("AVIATION_API_KEY")
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 AIRPORT_IATA = 'GEG'
@@ -25,14 +26,19 @@ GEG_LON = -117.5352
 # --- TIMEZONE SETUP ---
 SPOKANE_TZ = pytz.timezone('US/Pacific')
 
-# --- STATIC FALLBACK DATA ---
-FALLBACK_AIRLINE_ZONES = {
-    'AS': 'Zone C (North)', 'QX': 'Zone C (North)', 'AA': 'Zone C (North)', 'F9': 'Zone C (North)',
-    'AC': 'Zone C (North)',
-    'DL': 'Zone A/B (South)', 'UA': 'Zone A/B (South)', 'WN': 'Zone A/B (South)',
-    'G4': 'Zone A/B (South)', 'SY': 'Zone A/B (South)', 'WS': 'Zone A/B (South)'
+# --- VERIFIED TERMINAL DATA ---
+PASSENGER_AIRLINES = {
+    'AS': 'Zone C (Alaska)', 
+    'AA': 'Zone C (American)', 
+    'F9': 'Zone C (Frontier)', 
+    'DL': 'Zone A/B (Delta)', 
+    'UA': 'Zone A/B (United)', 
+    'WN': 'Zone A/B (Southwest)', 
+    'G4': 'Zone A/B (Allegiant)',
+    'SY': 'Zone A/B (Sun Country)'
 }
 
+# TNC Waiting Lot Location
 TNC_LOT_MAP_URL = "https://www.google.com/maps/search/?api=1&query=Spokane+International+Airport+Cell+Phone+Waiting+Lot"
 
 # --- FLASK KEEP-ALIVE ---
@@ -51,19 +57,21 @@ def keep_alive():
     t.daemon = True
     t.start()
 
-# --- CACHING STRATEGY ---
-data_cache = {
-    'df': None,
-    'timestamp': None
+# --- CACHING (Set to 8 hours to save Free Tier credits) ---
+flight_cache = {
+    'departures': {'data': None, 'timestamp': None},
+    'arrivals': {'data': None, 'timestamp': None}
 }
-CACHE_DURATION_MINUTES = 240 # 4 hours
+# 480 Minutes = 8 Hours. 
+# This limits you to ~3 updates/day automatically, saving your 100/mo quota.
+CACHE_DURATION_MINUTES = 480 
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
-# --- WEATHER FUNCTION ---
+# --- WEATHER FUNCTION (OpenWeatherMap - Keep this, it works) ---
 def get_weather():
     if not OPENWEATHER_API_KEY:
         return "Weather unavailable (Key missing)"
@@ -79,221 +87,179 @@ def get_weather():
         desc = data['weather'][0]['description'].title()
         return f"{desc}, {temp}°F"
     except Exception as e:
-        logging.error(f"Weather Error: {e}")
+        logging.error(f"Weather API Error: {e}")
         return "Weather unavailable"
 
-# --- SMART ZONE DETECTOR ---
-def detect_zone(gate, airline_iata):
-    """Determines Zone C vs Zone A/B based on Gate first, then Airline."""
-    # 1. Trust the Gate if we have it
-    if gate:
-        g = str(gate).upper()
-        if g.startswith('C'): return "Zone C (North)"
-        if g.startswith('A') or g.startswith('B'): return "Zone A/B (South)"
+# --- AVIATIONSTACK DATA FETCHING (Restored) ---
+def get_flight_data(mode='departure', force_refresh=False):
+    global flight_cache
+    cached = flight_cache[mode + 's']
     
-    # 2. Fallback to Airline Code
-    return FALLBACK_AIRLINE_ZONES.get(airline_iata, "Unknown Zone")
+    if cached['data'] is not None and cached['timestamp'] and not force_refresh:
+        if datetime.now() - cached['timestamp'] < timedelta(minutes=CACHE_DURATION_MINUTES):
+            logging.info(f"Returning cached {mode} data.")
+            return cached['data']
 
-# --- AERODATABOX API FETCHING (FIXED PARSER) ---
-def fetch_aerodatabox_data():
-    if not RAPIDAPI_KEY:
-        logging.error("RapidAPI Key missing.")
+    url = "http://api.aviationstack.com/v1/flights"
+    params = {
+        'access_key': AVIATIONSTACK_API_KEY,
+        'dep_iata' if mode == 'departure' else 'arr_iata': AIRPORT_IATA,
+    }
+    
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status() 
+        data = response.json()
+        
+        if 'data' in data:
+            flight_cache[mode + 's']['data'] = data['data']
+            flight_cache[mode + 's']['timestamp'] = datetime.now()
+            return data['data']
+        return []
+    except Exception as e:
+        logging.error(f"AviationStack Error: {e}")
         return None
 
-    now = datetime.now(SPOKANE_TZ)
-    end = now + timedelta(hours=12)
+def process_data_into_df():
+    deps = get_flight_data('departure')
+    arrs = get_flight_data('arrival')
     
-    # AeroDataBox expects local time in URL
-    time_from = now.strftime('%Y-%m-%dT%H:%M')
-    time_to = end.strftime('%Y-%m-%dT%H:%M')
-    
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": "aerodatabox.p.rapidapi.com"
-    }
-
-    endpoints = [
-        ("arrival", f"https://aerodatabox.p.rapidapi.com/flights/airports/iata/{AIRPORT_IATA}/{time_from}/{time_to}?direction=Arrival&withPrivate=false"),
-        ("departure", f"https://aerodatabox.p.rapidapi.com/flights/airports/iata/{AIRPORT_IATA}/{time_from}/{time_to}?direction=Departure&withPrivate=false")
-    ]
+    if deps is None or arrs is None:
+        return None
 
     all_flights = []
+    now_spokane = datetime.now(SPOKANE_TZ)
+    
+    def parse_time(time_str):
+        if not time_str: return None
+        # Parse UTC and convert to Spokane
+        dt_utc = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
+        return dt_utc.astimezone(SPOKANE_TZ)
 
-    for type_label, url in endpoints:
-        try:
-            response = requests.get(url, headers=headers, timeout=20)
-            response.raise_for_status()
-            data = response.json()
+    def get_zone(flight):
+        if not flight.get('airline'): return None
+        return PASSENGER_AIRLINES.get(flight['airline'].get('iata'))
+
+    for f in deps:
+        dt = parse_time(f['departure']['scheduled'])
+        zone = get_zone(f)
+        if dt and zone and dt > now_spokane:
+            all_flights.append({'time': dt, 'type': 'Departure', 'status': f['flight_status'], 'zone': zone})
             
-            # Get list based on keys 'arrivals' or 'departures'
-            flight_list = data.get('arrivals') if type_label == 'arrival' else data.get('departures')
+    for f in arrs:
+        dt = parse_time(f['arrival']['scheduled'])
+        zone = get_zone(f)
+        if dt and zone and dt > now_spokane:
+            all_flights.append({'time': dt, 'type': 'Arrival', 'status': f['flight_status'], 'zone': zone})
             
-            if not flight_list:
-                continue
-
-            for f in flight_list:
-                try:
-                    # 1. Skip Cargo
-                    if f.get('isCargo') == True: continue
-
-                    # 2. Extract Data Block based on direction
-                    # The time/gate info is nested inside 'arrival' or 'departure' object
-                    data_block = f.get('arrival') if type_label == 'arrival' else f.get('departure')
-                    
-                    if not data_block: continue
-
-                    # 3. Time Parsing (Crucial Fix: Handle Space vs T)
-                    # Look for revisedTime (Live) first, then scheduledTime
-                    time_obj = data_block.get('revisedTime') or data_block.get('scheduledTime')
-                    if not time_obj: continue
-
-                    # The API returns "local" string like "2025-12-06 20:25-05:00"
-                    time_str = time_obj.get('local')
-                    if not time_str: continue
-
-                    # FIX: Replace space with T to make it ISO compliant
-                    clean_time_str = time_str.replace(" ", "T")
-                    
-                    dt = datetime.fromisoformat(clean_time_str)
-                    
-                    # Ensure it is timezone aware
-                    if dt.tzinfo is None:
-                        dt = SPOKANE_TZ.localize(dt)
-                    
-                    # 4. Details
-                    gate = data_block.get('gate', 'TBD')
-                    status = f.get('status', 'Scheduled')
-                    
-                    airline_obj = f.get('airline', {})
-                    airline_name = airline_obj.get('name', 'Unknown')
-                    airline_iata = airline_obj.get('iata', '??')
-                    flight_num = f.get('number', '??')
-
-                    zone = detect_zone(gate, airline_iata)
-
-                    all_flights.append({
-                        'time': dt,
-                        'type': type_label.capitalize(), 
-                        'status': status,
-                        'zone': zone,
-                        'airline': airline_name,
-                        'flight_num': flight_num,
-                        'gate': gate
-                    })
-
-                except Exception as parse_e:
-                    logging.error(f"Row Parse Error: {parse_e}")
-                    continue
-
-        except Exception as e:
-            logging.error(f"API Fail for {type_label}: {e}")
-            continue
-
-    if not all_flights:
-        return pd.DataFrame()
-        
+    if not all_flights: return pd.DataFrame()
+    
     df = pd.DataFrame(all_flights)
+    df = df[df['time'] <= now_spokane + timedelta(hours=24)]
     df['hour'] = df['time'].dt.hour
     return df
 
-def get_data_with_cache(force_refresh=False):
-    global data_cache
-    if data_cache['df'] is not None and not force_refresh:
-        if datetime.now() - data_cache['timestamp'] < timedelta(minutes=CACHE_DURATION_MINUTES):
-            return data_cache['df']
-
-    logging.info("Refreshing Cache...")
-    new_df = fetch_aerodatabox_data()
-    
-    if new_df is not None:
-        data_cache['df'] = new_df
-        data_cache['timestamp'] = datetime.now()
-        return new_df
-    return None
-
 # --- HANDLERS ---
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚖 **GEG Pro Driver (v11.0 JSON-Fixed)**\n\n"
+        "🚖 **GEG Pro Driver (Reverted)**\n\n"
         "commands:\n"
         "/status - Strategy & Weather\n"
         "/arrivals - Pickups\n"
         "/departures - Drop-offs\n"
         "/graph - Demand Chart\n"
         "/delays - Delay Watch\n"
-        "/refresh - Force Update"
+        "/navigate - GPS\n"
+        "/refresh - Force Update (Use sparingly!)"
     )
 
 async def refresh_cache_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔄 Force refreshing data...")
-    df = get_data_with_cache(force_refresh=True)
-    if df is None:
-        await update.message.reply_text("❌ API Error.")
-    elif df.empty:
-         await update.message.reply_text("⚠️ API connected, but returned 0 flights.")
+    await update.message.reply_text("🔄 Checking AviationStack...")
+    # Force refresh
+    res = get_flight_data('arrival', force_refresh=True)
+    if res is None:
+        await update.message.reply_text("❌ API Error (Check Limits)")
     else:
-        count = len(df)
-        await update.message.reply_text(f"✅ Success. Found {count} flights.")
+        await update.message.reply_text("✅ Data Refreshed")
 
 async def navigate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("🗺️ Open Google Maps", url=TNC_LOT_MAP_URL)]]
-    await update.message.reply_text("Tap to Navigate:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [[InlineKeyboardButton("Open Google Maps", url=TNC_LOT_MAP_URL)]]
+    await update.message.reply_text("Navigate:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def driver_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     weather = get_weather()
-    df = get_data_with_cache()
+    df = process_data_into_df()
     
-    if df is None:
-        await update.message.reply_text("❌ API Error")
-        return
+    now_spokane = datetime.now(SPOKANE_TZ)
 
-    now = datetime.now(SPOKANE_TZ)
-    future_df = df[df['time'] > now] if not df.empty else df
+    if df is None: 
+        await update.message.reply_text(f"❌ **API Error**\nWeather: {weather}")
+        return
     
-    if future_df.empty:
-        await update.message.reply_text(f"**STATUS REPORT**\nTime: {now.strftime('%H:%M')}\nWeather: {weather}\n\n⚠️ No data. Try /refresh")
+    if df.empty: 
+        await update.message.reply_text(f"**STATUS**\nTime: {now_spokane.strftime('%H:%M')}\nWeather: {weather}\n\nNo flights found (Check /refresh)")
         return
-
-    next_3 = future_df[future_df['time'] <= now + timedelta(hours=3)]
+    
+    next_3 = df[df['time'] <= now_spokane + timedelta(hours=3)]
     arr_count = len(next_3[next_3['type'] == 'Arrival'])
     
-    if arr_count >= 5: demand = "HIGH SURGE"
-    elif arr_count >= 2: demand = "MODERATE"
+    if arr_count >= 6: demand = "HIGH SURGE"
+    elif arr_count >= 3: demand = "MODERATE"
     else: demand = "LOW"
+
+    if not df[df['type'] == 'Arrival'].empty:
+        arr_hourly = df[df['type'] == 'Arrival'].groupby('hour').size()
+        top_hours = arr_hourly.nlargest(3).index.tolist()
+        top_hours.sort()
+        best_time = ", ".join([f"{h}:00" for h in top_hours])
+    else:
+        best_time = "None"
     
     output = f"**GEG STATUS**\n"
-    output += f"Time: {now.strftime('%H:%M')}\n"
+    output += f"Time: {now_spokane.strftime('%H:%M')}\n"
     output += f"Weather: {weather}\n"
     output += f"Demand: **{demand}** ({arr_count} arrs)\n"
+    output += f"Best Hours: `{best_time}`"
     
     await update.message.reply_text(output, parse_mode='Markdown')
 
 async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mode = 'Departure' if 'departures' in update.message.text else 'Arrival'
-    df = get_data_with_cache()
+    mode = 'departure' if 'departures' in update.message.text else 'arrival'
+    flights = get_flight_data(mode)
     
-    if df is None or df.empty: 
-        return await update.message.reply_text("No data found. Try /refresh")
-
-    now = datetime.now(SPOKANE_TZ)
-    valid = df[(df['type'] == mode) & (df['time'] > now)].sort_values('time')
+    if flights is None: return await update.message.reply_text("❌ API Error")
+    if not flights: return await update.message.reply_text(f"No {mode}s found.")
     
-    if valid.empty:
-        return await update.message.reply_text(f"No future {mode}s found in cache.")
-
-    msg = f"**{mode.upper()}S**\n"
+    valid = []
+    now_spokane = datetime.now(SPOKANE_TZ)
+    
+    for f in flights:
+        if f[mode]['scheduled'] and f.get('airline'):
+            zone = PASSENGER_AIRLINES.get(f['airline'].get('iata'))
+            if zone:
+                dt_utc = datetime.fromisoformat(f[mode]['scheduled'].replace('Z', '+00:00'))
+                dt_local = dt_utc.astimezone(SPOKANE_TZ)
+                
+                if dt_local > now_spokane:
+                    valid.append({'data': f, 'zone': zone, 'time': dt_local})
+    
+    valid.sort(key=lambda x: x['time'])
+    
+    title = "Pickups" if mode == 'arrival' else "Drop-offs"
+    msg = f"**{title}**\n"
     
     last_time = None
     cluster_count = 0
     
-    for _, row in valid.head(15).iterrows():
-        dt = row['time']
-        time_str = dt.strftime('%H:%M')
-        name = row['airline'].replace(" Airlines", "").replace(" Air Lines", "")
-        gate_info = row['gate']
+    for item in valid[:15]:
+        f = item['data']
+        dt = item['time']
         
-        if mode == 'Arrival':
+        name = f['airline']['name'].replace(" Airlines", "").replace(" Air Lines", "").replace(" Inc.", "")
+        num = f['flight']['iata']
+        time_str = dt.strftime('%H:%M')
+        
+        if mode == 'arrival':
             if last_time and (dt - last_time < timedelta(minutes=20)):
                 cluster_count += 1
             else: cluster_count = 1
@@ -303,40 +269,29 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             ready_time = (dt + timedelta(minutes=20)).strftime('%H:%M')
             msg += f"*{time_str}* (Ready {ready_time}) - {name}\n"
-            msg += f"   📍 {row['zone']} | Gate {gate_info}\n"
+            msg += f"   📍 {item['zone']}\n"
         else:
-            msg += f"*{time_str}* - {name} ({gate_info})\n"
-
+            msg += f"*{time_str}* - {name} ({num})\n"
+        
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def check_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    df = get_data_with_cache()
-    if df is None or df.empty: return await update.message.reply_text("No data.")
+    df = process_data_into_df()
+    if df is None: return await update.message.reply_text("❌ API Error")
+    if df.empty: return await update.message.reply_text("No data.")
     
-    now = datetime.now(SPOKANE_TZ)
-    keywords = ['Delayed', 'Cancelled', 'Diverted']
-    
-    mask = (df['time'] > now) & (df['status'].str.contains('|'.join(keywords), case=False, na=False))
-    delays = df[mask]
-    
-    if delays.empty:
-        await update.message.reply_text("✅ No delays reported.")
+    delays = df[df['status'].isin(['active', 'delayed', 'cancelled'])]
+    if delays.empty: return await update.message.reply_text("✅ No delays.")
     else:
-        msg = "**DELAY ALERT**\n"
-        for _, row in delays.iterrows():
-            msg += f"{row['time'].strftime('%H:%M')} {row['airline']} -> {row['status']}\n"
+        msg = "**DELAY REPORT**\n"
+        for _, row in delays.iterrows(): 
+            msg += f"{row['time'].strftime('%H:%M')} - {row['status']} ({row['zone']})\n"
         await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def send_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    df = get_data_with_cache()
+    df = process_data_into_df()
     if df is None or df.empty:
-        await update.message.reply_text("No data for graph.")
-        return
-        
-    now = datetime.now(SPOKANE_TZ)
-    df = df[df['time'] > now]
-    if df.empty:
-        await update.message.reply_text("No future data for graph.")
+        await update.message.reply_text("No data.")
         return
 
     hourly = df.groupby(['hour', 'type']).size().unstack(fill_value=0)
@@ -348,7 +303,7 @@ async def send_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
     plt.bar(hourly.index - 0.2, hourly['Departure'], width=0.4, color='red', label='Dep')
     plt.bar(hourly.index + 0.2, hourly['Arrival'], width=0.4, color='green', label='Arr')
     plt.legend()
-    plt.title("GEG Demand (Pacific Time)")
+    plt.title('GEG Demand (Pacific)')
     
     buf = io.BytesIO()
     plt.savefig(buf, format='png')
@@ -356,16 +311,15 @@ async def send_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buf.seek(0)
     await update.message.reply_photo(photo=buf)
 
-# --- MAIN ---
 if __name__ == '__main__':
     keep_alive()
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('status', driver_status))
-    application.add_handler(CommandHandler('arrivals', list_flights))
-    application.add_handler(CommandHandler('departures', list_flights))
     application.add_handler(CommandHandler('graph', send_graph))
     application.add_handler(CommandHandler('delays', check_delays))
-    application.add_handler(CommandHandler('refresh', refresh_cache_cmd))
+    application.add_handler(CommandHandler('status', driver_status))
+    application.add_handler(CommandHandler('departures', list_flights))
+    application.add_handler(CommandHandler('arrivals', list_flights))
     application.add_handler(CommandHandler('navigate', navigate))
+    application.add_handler(CommandHandler('refresh', refresh_cache_cmd))
     application.run_polling()
