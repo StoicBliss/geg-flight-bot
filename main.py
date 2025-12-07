@@ -1,6 +1,6 @@
 import os
 import requests
-from requests.exceptions import RequestException
+from requests.exceptions import RequestException, HTTPError
 import pandas as pd
 import matplotlib
 # Set backend to 'Agg' for headless servers (Render)
@@ -26,11 +26,11 @@ GEG_LON = -117.5352
 SPOKANE_TZ = pytz.timezone('US/Pacific')
 
 # --- STATIC FALLBACK DATA ---
-# If gate info is missing, we fall back to this list
 FALLBACK_AIRLINE_ZONES = {
-    'AS': 'Zone C', 'QX': 'Zone C', 'AA': 'Zone C', 'F9': 'Zone C', # North
-    'DL': 'Zone A/B', 'UA': 'Zone A/B', 'WN': 'Zone A/B', 'OO': 'Check Gate', # South
-    'G4': 'Zone A/B', 'SY': 'Zone A/B', 'WS': 'Zone A/B', 'AC': 'Zone C'
+    'AS': 'Zone C (North)', 'QX': 'Zone C (North)', 'AA': 'Zone C (North)', 'F9': 'Zone C (North)',
+    'AC': 'Zone C (North)',
+    'DL': 'Zone A/B (South)', 'UA': 'Zone A/B (South)', 'WN': 'Zone A/B (South)',
+    'G4': 'Zone A/B (South)', 'SY': 'Zone A/B (South)', 'WS': 'Zone A/B (South)'
 }
 
 TNC_LOT_MAP_URL = "https://www.google.com/maps/search/?api=1&query=Spokane+International+Airport+Cell+Phone+Waiting+Lot"
@@ -94,7 +94,7 @@ def detect_zone(gate, airline_iata):
     # 2. Fallback to Airline Code
     return FALLBACK_AIRLINE_ZONES.get(airline_iata, "Unknown Zone")
 
-# --- AERODATABOX API FETCHING ---
+# --- AERODATABOX API FETCHING (FIXED PARSER) ---
 def fetch_aerodatabox_data():
     if not RAPIDAPI_KEY:
         logging.error("RapidAPI Key missing.")
@@ -103,7 +103,7 @@ def fetch_aerodatabox_data():
     now = datetime.now(SPOKANE_TZ)
     end = now + timedelta(hours=12)
     
-    # Time format: 2025-12-07T09:00
+    # AeroDataBox expects local time in URL
     time_from = now.strftime('%Y-%m-%dT%H:%M')
     time_to = end.strftime('%Y-%m-%dT%H:%M')
     
@@ -112,7 +112,6 @@ def fetch_aerodatabox_data():
         "x-rapidapi-host": "aerodatabox.p.rapidapi.com"
     }
 
-    # Fetch Arrivals AND Departures
     endpoints = [
         ("arrival", f"https://aerodatabox.p.rapidapi.com/flights/airports/iata/{AIRPORT_IATA}/{time_from}/{time_to}?direction=Arrival&withPrivate=false"),
         ("departure", f"https://aerodatabox.p.rapidapi.com/flights/airports/iata/{AIRPORT_IATA}/{time_from}/{time_to}?direction=Departure&withPrivate=false")
@@ -126,47 +125,50 @@ def fetch_aerodatabox_data():
             response.raise_for_status()
             data = response.json()
             
+            # Get list based on keys 'arrivals' or 'departures'
             flight_list = data.get('arrivals') if type_label == 'arrival' else data.get('departures')
             
             if not flight_list:
-                logging.warning(f"API returned empty list for {type_label}")
                 continue
 
             for f in flight_list:
                 try:
-                    # 1. Skip Cargo (FedEx/UPS)
+                    # 1. Skip Cargo
                     if f.get('isCargo') == True: continue
 
-                    # 2. Time Parsing
-                    time_obj = f.get('movement', {})
-                    # Use revised time if available, else scheduled
-                    time_str = time_obj.get('revisedTime') or time_obj.get('scheduledTime')
+                    # 2. Extract Data Block based on direction
+                    # The time/gate info is nested inside 'arrival' or 'departure' object
+                    data_block = f.get('arrival') if type_label == 'arrival' else f.get('departure')
                     
-                    if not time_str: continue 
-                    
-                    dt = datetime.fromisoformat(time_str)
-                    # Force timezone to Spokane
-                    if dt.tzinfo is None: dt = SPOKANE_TZ.localize(dt)
-                    else: dt = dt.astimezone(SPOKANE_TZ)
+                    if not data_block: continue
 
-                    # 3. Extract Details
+                    # 3. Time Parsing (Crucial Fix: Handle Space vs T)
+                    # Look for revisedTime (Live) first, then scheduledTime
+                    time_obj = data_block.get('revisedTime') or data_block.get('scheduledTime')
+                    if not time_obj: continue
+
+                    # The API returns "local" string like "2025-12-06 20:25-05:00"
+                    time_str = time_obj.get('local')
+                    if not time_str: continue
+
+                    # FIX: Replace space with T to make it ISO compliant
+                    clean_time_str = time_str.replace(" ", "T")
+                    
+                    dt = datetime.fromisoformat(clean_time_str)
+                    
+                    # Ensure it is timezone aware
+                    if dt.tzinfo is None:
+                        dt = SPOKANE_TZ.localize(dt)
+                    
+                    # 4. Details
+                    gate = data_block.get('gate', 'TBD')
+                    status = f.get('status', 'Scheduled')
+                    
                     airline_obj = f.get('airline', {})
                     airline_name = airline_obj.get('name', 'Unknown')
                     airline_iata = airline_obj.get('iata', '??')
                     flight_num = f.get('number', '??')
-                    status = f.get('status', 'Scheduled')
-                    
-                    # 4. Smart Zone Logic
-                    # Gate info is often inside 'location' object or 'movement'
-                    # AeroDataBox puts it in movement -> airport -> gate usually, but varies.
-                    # Based on your JSON, it's NOT deeply nested. It's direct?
-                    # Let's check structure carefully. 
-                    # Your sample: "departure": { "gate": "E69" ... }
-                    # So we look at the 'movement' block we already grabbed?
-                    # No, your JSON showed 'departure' object. AeroDataBox flattens it differently depending on endpoint.
-                    # We will try to find gate in movement.
-                    gate = time_obj.get('gate') # Try direct access
-                    
+
                     zone = detect_zone(gate, airline_iata)
 
                     all_flights.append({
@@ -176,16 +178,15 @@ def fetch_aerodatabox_data():
                         'zone': zone,
                         'airline': airline_name,
                         'flight_num': flight_num,
-                        'gate': gate if gate else "TBD"
+                        'gate': gate
                     })
-                        
+
                 except Exception as parse_e:
                     logging.error(f"Row Parse Error: {parse_e}")
                     continue
 
         except Exception as e:
-            logging.error(f"API Fail: {e}")
-            # If one direction fails, we still want to show the other if possible
+            logging.error(f"API Fail for {type_label}: {e}")
             continue
 
     if not all_flights:
@@ -204,7 +205,6 @@ def get_data_with_cache(force_refresh=False):
     logging.info("Refreshing Cache...")
     new_df = fetch_aerodatabox_data()
     
-    # Even if empty, we update timestamp to prevent spamming API if it's truly empty
     if new_df is not None:
         data_cache['df'] = new_df
         data_cache['timestamp'] = datetime.now()
@@ -215,7 +215,7 @@ def get_data_with_cache(force_refresh=False):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚖 **GEG Pro Driver (v10.0 Unbreakable)**\n\n"
+        "🚖 **GEG Pro Driver (v11.0 JSON-Fixed)**\n\n"
         "commands:\n"
         "/status - Strategy & Weather\n"
         "/arrivals - Pickups\n"
@@ -249,7 +249,6 @@ async def driver_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     now = datetime.now(SPOKANE_TZ)
-    # Strict Future Filter
     future_df = df[df['time'] > now] if not df.empty else df
     
     if future_df.empty:
@@ -288,12 +287,11 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_time = None
     cluster_count = 0
     
-    # Show more flights (up to 15) since we have no filter now
     for _, row in valid.head(15).iterrows():
         dt = row['time']
         time_str = dt.strftime('%H:%M')
-        # Clean up airline name "SkyWest Airlines" -> "SkyWest"
         name = row['airline'].replace(" Airlines", "").replace(" Air Lines", "")
+        gate_info = row['gate']
         
         if mode == 'Arrival':
             if last_time and (dt - last_time < timedelta(minutes=20)):
@@ -305,9 +303,9 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             ready_time = (dt + timedelta(minutes=20)).strftime('%H:%M')
             msg += f"*{time_str}* (Ready {ready_time}) - {name}\n"
-            msg += f"   📍 {row['zone']} | Gate {row['gate']}\n"
+            msg += f"   📍 {row['zone']} | Gate {gate_info}\n"
         else:
-            msg += f"*{time_str}* - {name} ({row['gate']})\n"
+            msg += f"*{time_str}* - {name} ({gate_info})\n"
 
     await update.message.reply_text(msg, parse_mode='Markdown')
 
@@ -318,7 +316,6 @@ async def check_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(SPOKANE_TZ)
     keywords = ['Delayed', 'Cancelled', 'Diverted']
     
-    # Boolean mask for filtering
     mask = (df['time'] > now) & (df['status'].str.contains('|'.join(keywords), case=False, na=False))
     delays = df[mask]
     
@@ -331,7 +328,6 @@ async def check_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def send_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Graph logic remains same, just ensuring it handles empty data
     df = get_data_with_cache()
     if df is None or df.empty:
         await update.message.reply_text("No data for graph.")
