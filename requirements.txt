@@ -1,6 +1,5 @@
 python-telegram-bot
 requests
 pandas
-matplotlib
 pytz
 flask
