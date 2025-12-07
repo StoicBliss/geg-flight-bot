@@ -15,7 +15,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "GEG Pro Bot (Nav + Delays) Online!"
+    return "GEG Pro Bot (HTML Edition) Online!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
@@ -111,39 +111,31 @@ def fetch_flights(mode):
                 
                 if not code or not num: continue
 
-                # Filter Duplicates & Cargo
                 uid = f"{code}{num}"
                 if uid in seen_flights: continue
                 seen_flights.add(uid)
                 if code in ['FX', '5X', 'PO', 'K4', 'QY', 'ABX', 'ATI']: continue 
 
-                # --- TIMING LOGIC (With Delay Calc) ---
-                # Get Scheduled Time
+                # Timing
                 sched_str = f.get('arr_time') if mode == 'arrival' else f.get('dep_time')
-                # Get Estimated Time
                 est_str = f.get('arr_estimated') if mode == 'arrival' else f.get('dep_estimated')
                 
-                # If no schedule, skip
                 if not sched_str: continue
                 
-                # Use estimated if available, else scheduled
                 final_str = est_str if est_str else sched_str
                 
-                # Parse Dates
                 sched_dt = datetime.strptime(sched_str, '%Y-%m-%d %H:%M')
                 sched_local = TIMEZONE.localize(sched_dt)
                 
                 final_dt = datetime.strptime(final_str, '%Y-%m-%d %H:%M')
                 final_local = TIMEZONE.localize(final_dt)
 
-                # Filter Window
                 if final_local < now - timedelta(minutes=20): continue
                 if final_local > now + timedelta(hours=24): continue
 
-                # Calculate Delay (Minutes)
                 delay_mins = int((final_local - sched_local).total_seconds() / 60)
                 
-                # Check Status
+                # Status Logic
                 api_status = f.get('status', '').lower()
                 status_display = ""
                 
@@ -168,7 +160,7 @@ def fetch_flights(mode):
                     'time': final_local,
                     'time_str': final_local.strftime('%H:%M'),
                     'zone': zone,
-                    'status': status_display, # "🔴 CANCELLED" or "⚠️ Delayed 45m" or ""
+                    'status': status_display,
                     'is_problem': (api_status == 'cancelled' or delay_mins > 15)
                 })
             except Exception:
@@ -190,17 +182,19 @@ async def safe_edit(context, chat_id, msg_id, text, reply_markup=None):
             chat_id=chat_id, 
             message_id=msg_id, 
             text=text, 
-            reply_markup=reply_markup
+            parse_mode='HTML',  # <--- CRITICAL FIX: HTML MODE ENABLED
+            reply_markup=reply_markup,
+            disable_web_page_preview=True
         )
     except BadRequest:
         pass 
     except Exception:
-        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', reply_markup=reply_markup)
 
 # --- BOT COMMANDS --- #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚘 **GEG Pro Driver Bot**\n/status, /arrivals, /departures, /delays")
+    await update.message.reply_text("🚘 <b>GEG Pro Driver Bot</b>\n/status, /arrivals, /departures, /delays", parse_mode='HTML')
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("📡 Analyzing...")
@@ -209,7 +203,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         flights = fetch_flights('arrival')
         now = get_spokane_time()
         
-        # Count only active flights (not cancelled)
         active_flights = [f for f in flights if "CANCELLED" not in f['status']]
         count = len([f for f in active_flights if now < f['time'] < now + timedelta(hours=1)])
         
@@ -218,13 +211,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if count >= 4: strategy = "🟢 GO TO AIRPORT NOW"
         if weather and ("Rain" in weather or "Snow" in weather): strategy += " (Surge Likely)"
         
-        text = (f"📊 **STATUS: {now.strftime('%I:%M %p')}**\n"
+        text = (f"📊 <b>STATUS: {now.strftime('%I:%M %p')}</b>\n"
                 f"🌡️ {temp}°F, {weather}\n"
                 f"🛬 Inbound (1hr): {count} planes\n"
                 f"🚦 {strategy}")
 
-        # --- NAVIGATION BUTTON ---
-        # Google Maps Universal Link
+        # Nav Button
         map_url = "https://www.google.com/maps/search/?api=1&query=Spokane+International+Airport+Cell+Phone+Waiting+Lot"
         keyboard = [[InlineKeyboardButton("🗺️ Nav to Waiting Lot", url=map_url)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -241,14 +233,14 @@ async def show_arrivals(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(context, update.effective_chat.id, msg.message_id, "No upcoming arrivals.")
         return
 
-    text = "🛬 **ARRIVALS**\nTime | Airline | Flight | Pickup | Zone\n"
+    text = "🛬 <b>ARRIVALS</b>\nTime | Airline | Flight | Pickup | Zone\n"
     text += "-----------------------------------------\n"
     
     for f in flights[:15]:
         pickup = (f['time'] + timedelta(minutes=20)).strftime('%H:%M')
-        # Add status icon if delayed/cancelled
         status_icon = "⚠️" if "Delayed" in f['status'] else ("🔴" if "CANCELLED" in f['status'] else "")
         
+        # Use <pre> for cleaner columns if desired, but standard text is fine
         line = f"{status_icon}{f['time_str']} | {f['airline']} | {f['code']}{f['num']} | {pickup} | {f['zone']}\n"
         text += line
     
@@ -262,7 +254,7 @@ async def show_departures(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(context, update.effective_chat.id, msg.message_id, "No upcoming departures.")
         return
 
-    text = "🛫 **DEPARTURES**\nTime | Airline | Flight | Zone\n"
+    text = "🛫 <b>DEPARTURES</b>\nTime | Airline | Flight | Zone\n"
     text += "-----------------------------------------\n"
     
     for f in flights[:15]:
@@ -273,14 +265,10 @@ async def show_departures(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_edit(context, update.effective_chat.id, msg.message_id, text)
 
 async def show_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """New separate monitor for just trouble flights"""
     msg = await update.message.reply_text("📡 Scanning for Issues...")
-    
-    # Check both arrivals and departures
     arr = fetch_flights('arrival')
     dep = fetch_flights('departure')
     
-    # Filter for problems
     problems = []
     for f in arr:
         if f['is_problem']: 
@@ -291,19 +279,17 @@ async def show_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f['type'] = "🛫 Dep"
             problems.append(f)
             
-    # Sort by time
     problems.sort(key=lambda x: x['time'])
     
     if not problems:
         await safe_edit(context, update.effective_chat.id, msg.message_id, "✅ All systems normal. No major delays found.")
         return
 
-    text = "🚨 **TROUBLE MONITOR (Delays/Cancels)**\n"
+    text = "🚨 <b>TROUBLE MONITOR (Delays/Cancels)</b>\n"
     text += "-----------------------------------------\n"
     
     for f in problems[:20]:
-        # Format: ⚠️ 14:30 | Arr | AA123 | Delayed 45m
-        line = f"{f['time_str']} | {f['type']} | {f['code']}{f['num']} | {f['status']}\n"
+        line = f"{f['time_str']} | {f['type']} | {f['code']}{f['num']} | <b>{f['status']}</b>\n"
         text += line
         
     await safe_edit(context, update.effective_chat.id, msg.message_id, text)
@@ -316,6 +302,6 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('status', status))
     application.add_handler(CommandHandler('arrivals', show_arrivals))
     application.add_handler(CommandHandler('departures', show_departures))
-    application.add_handler(CommandHandler('delays', show_delays)) # New Command
+    application.add_handler(CommandHandler('delays', show_delays))
     
     application.run_polling()
