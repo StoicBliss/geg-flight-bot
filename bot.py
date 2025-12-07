@@ -4,7 +4,7 @@ import time
 import requests
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg') # Fixes 'tkinter' errors on headless servers
+matplotlib.use('Agg') # Essential for Render
 import matplotlib.pyplot as plt
 import io
 import threading
@@ -50,10 +50,11 @@ TERMINAL_MAP = {
     'Frontier Airlines': 'Zone C (North)',
 }
 
-# --- GLOBAL CACHE --- #
+# --- GLOBAL CACHE (FIXED KEYS) --- #
+# keys are now singular to match the 'mode' variable (arrival/departure)
 flight_cache = {
-    "arrivals": {"data": None, "timestamp": 0},
-    "departures": {"data": None, "timestamp": 0}
+    "arrival": {"data": None, "timestamp": 0},
+    "departure": {"data": None, "timestamp": 0}
 }
 CACHE_DURATION = 1800 
 
@@ -214,7 +215,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Inbound (1h): {count} flights\n"
                 f"Strategy: {strategy}")
         
-        # REMOVED parse_mode TO PREVENT CRASHES
         await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=text)
     except Exception as e:
         logger.error(f"Status Error: {e}")
@@ -230,7 +230,6 @@ async def show_arrivals(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text = "UPCOMING ARRIVALS (GEG)\n"
         for f in flights[:15]: 
-            # Simple text format, no markdown symbols
             text += f"\n{f['time_str']} | {f['airline']} | {f['flight_no']}\nZone: {f['zone']} | Pickup: {f['pickup_str']}\n"
             
         await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=text)
