@@ -30,8 +30,9 @@ AIRPORT_IATA = 'GEG'
 TIMEZONE = pytz.timezone('America/Los_Angeles')
 
 # --- DATA MAPS --- #
-# Map Codes to Full Names for cleaner display
+# COMPREHENSIVE LIST to ensure Full Names show up
 AIRLINE_NAMES = {
+    # Major US
     'AA': 'American',
     'AS': 'Alaska',
     'DL': 'Delta',
@@ -40,21 +41,55 @@ AIRLINE_NAMES = {
     'F9': 'Frontier',
     'G4': 'Allegiant',
     'SY': 'Sun Country',
+    'NK': 'Spirit',
+    'B6': 'JetBlue',
+    'HA': 'Hawaiian',
+    
+    # Regionals (Operating Carriers)
     'QX': 'Horizon',
-    'OO': 'SkyWest'
+    'OO': 'SkyWest',
+    'MQ': 'Envoy',
+    'YX': 'Republic',
+    'YV': 'Mesa',
+    '9E': 'Endeavor',
+    'OH': 'PSA',
+    
+    # International / Codeshares often seen at GEG
+    'TN': 'Air Tahiti Nui', # Codeshare on Alaska
+    'VS': 'Virgin Atlantic', # Codeshare on Delta
+    'BA': 'British Airways', # Codeshare on Alaska/American
+    'JL': 'Japan Airlines', # Codeshare on Alaska
+    'QF': 'Qantas', # Codeshare on Alaska
+    'KE': 'Korean Air', # Codeshare on Delta
+    'LH': 'Lufthansa', # Codeshare on United
+    'FI': 'Icelandair', # Codeshare on Alaska
+    'AF': 'Air France', # Codeshare on Delta
+    'KL': 'KLM', # Codeshare on Delta
+    'QR': 'Qatar Airways', # Codeshare on Alaska/American
+    'WS': 'WestJet' 
 }
 
 # Terminal/Zone Logic
+# If a codeshare like "TN" (Air Tahiti) shows up, we map it to its partner's zone if possible
 TERMINAL_MAP = {
+    # Zone A/B (Rotunda) - Delta, United, Southwest
     'DL': 'Zone A/B (Rotunda)',
     'UA': 'Zone A/B (Rotunda)',
     'WN': 'Zone A/B (Rotunda)',
     'SY': 'Zone A/B (Rotunda)',
     'G4': 'Zone A/B (Rotunda)',
+    'NK': 'Zone A/B (Rotunda)',
+    'OO': 'Zone A/B (Check Screen)', # SkyWest flies for everyone
+    
+    # Zone C (North) - Alaska, American
     'AS': 'Zone C (North)',
     'QX': 'Zone C (North)',
     'AA': 'Zone C (North)',
-    'F9': 'Zone C (North)'
+    'F9': 'Zone C (North)',
+    'HA': 'Zone C (North)', # Hawaiian codeshares on Alaska
+    'TN': 'Zone C (North)', # Tahiti codeshares on Alaska
+    'BA': 'Zone C (North)', # BA codeshares on Alaska
+    'JL': 'Zone C (North)'  # Japan codeshares on Alaska
 }
 
 # --- GLOBAL CACHE --- #
@@ -116,11 +151,15 @@ def fetch_flights(mode):
                 
                 if not code or not num: continue
 
-                # Filter Codeshares & Cargo
+                # Filter Codeshares (Naive duplicate check)
+                # If we see AS2384 and then HA6346 (same time?), we can't easily link them without paid API data.
+                # But we can at least filter exact duplicate strings.
                 uid = f"{code}{num}"
                 if uid in seen_flights: continue
                 seen_flights.add(uid)
-                if code in ['FX', '5X', 'PO', 'K4', 'QY']: continue 
+
+                # Filter Cargo
+                if code in ['FX', '5X', 'PO', 'K4', 'QY', 'ABX', 'ATI']: continue 
 
                 # Time Logic
                 if mode == 'arrival':
@@ -145,7 +184,7 @@ def fetch_flights(mode):
                 else:
                     zone = TERMINAL_MAP.get(code, "Zone A/B")
 
-                # Get Full Name
+                # Get Full Name (Fallback to code if missing)
                 airline_full = AIRLINE_NAMES.get(code, code)
 
                 processed_flights.append({
@@ -170,7 +209,6 @@ def fetch_flights(mode):
 
 async def safe_edit(context, chat_id, msg_id, text):
     try:
-        # Check text length limit (Telegram limit is 4096 chars)
         if len(text) > 4000: text = text[:4000] + "\n... (truncated)"
         await context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text)
     except BadRequest:
@@ -219,7 +257,7 @@ async def show_arrivals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     for f in flights[:15]:
         pickup = (f['time'] + timedelta(minutes=20)).strftime('%H:%M')
-        # Format: 14:30 | American | AA123 | 14:50 | Zone C (North)
+        # Format: 08:34 | Hawaiian | HA6346 | 08:54 | Zone C (North)
         line = f"{f['time_str']} | {f['airline']} | {f['code']}{f['num']} | {pickup} | {f['zone']}\n"
         text += line
     
@@ -237,7 +275,6 @@ async def show_departures(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += "-----------------------------------------\n"
     
     for f in flights[:15]:
-        # Format: 16:00 | Alaska | AS456 | Zone C (North)
         line = f"{f['time_str']} | {f['airline']} | {f['code']}{f['num']} | {f['zone']}\n"
         text += line
     
