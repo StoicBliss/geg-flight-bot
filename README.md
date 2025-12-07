@@ -1,4 +1,4 @@
-# 🚕 GEG Airport Pro Driver Assistant
+# 🚕 GEG Flight Tracker
 
 A specialized Telegram bot designed for **Uber & Lyft drivers** at **Spokane International Airport (GEG)**. 
 
