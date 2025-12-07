@@ -2,6 +2,7 @@ import logging
 import os
 import requests
 import threading
+import time  # <--- THIS WAS MISSING
 from flask import Flask 
 from datetime import datetime, timedelta
 import pytz
@@ -29,8 +30,6 @@ AIRPORT_IATA = 'GEG'
 TIMEZONE = pytz.timezone('America/Los_Angeles')
 
 # --- INTELLIGENT ZONING SYSTEM --- #
-# We prioritize API data. If API gives 'null' terminal, we use this map.
-# Updated based on Spokane Official Terminal Map.
 TERMINAL_MAP = {
     'DL': 'Zone A/B (Rotunda)', # Delta
     'UA': 'Zone A/B (Rotunda)', # United
@@ -48,7 +47,7 @@ flight_cache = {
     "arrival": {"data": None, "timestamp": 0},
     "departure": {"data": None, "timestamp": 0}
 }
-CACHE_DURATION = 900  # 15 Minutes (Conserves API Limit to ~1000/mo)
+CACHE_DURATION = 900  # 15 Minutes
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -61,7 +60,6 @@ def get_spokane_time():
     return datetime.now(TIMEZONE)
 
 def get_weather():
-    """Fetches simple weather for strategy score."""
     url = f"http://api.openweathermap.org/data/2.5/weather?lat=47.619&lon=-117.535&appid={WEATHER_API_KEY}&units=imperial"
     try:
         r = requests.get(url, timeout=5).json()
@@ -73,11 +71,8 @@ def get_weather():
         return None, "Unavailable"
 
 def fetch_flights(mode):
-    """
-    Fetches flights from AirLabs Schedules API.
-    """
     global flight_cache
-    current_time = time.time()
+    current_time = time.time()  # This line crashed before because 'time' wasn't imported
     
     # 1. Check Cache
     if flight_cache[mode]["data"] and (current_time - flight_cache[mode]["timestamp"] < CACHE_DURATION):
@@ -86,21 +81,18 @@ def fetch_flights(mode):
 
     logger.info(f"Fetching {mode} from AirLabs Schedules...")
     
-    # API Documentation: https://airlabs.co/docs/schedules
     base_url = "https://airlabs.co/api/v9/schedules"
     
     params = {
         'api_key': AIRLABS_API_KEY,
-        # arr_iata for arrivals, dep_iata for departures
         'arr_iata' if mode == 'arrival' else 'dep_iata': AIRPORT_IATA,
-        'limit': 50  # Free Tier Limit per request
+        'limit': 50 
     }
 
     try:
         r = requests.get(base_url, params=params, timeout=15)
         data = r.json()
         
-        # Error Handling
         if 'error' in data:
             logger.error(f"AirLabs Error: {data['error']}")
             return []
@@ -109,32 +101,24 @@ def fetch_flights(mode):
         processed_flights = []
         now = get_spokane_time()
         
-        # Used to filter codeshares (duplicates)
         seen_flights = set()
 
         for f in raw_flights:
             try:
-                # 1. Essential Data Extraction
                 airline_code = f.get('airline_iata')
                 flight_num = f.get('flight_number')
                 
-                # Skip if vital data is missing
                 if not airline_code or not flight_num: continue
 
-                # 2. Codeshare Filter
-                # If 'cs_flight_number' exists, it's likely a duplicate listing
-                # We only want the operating carrier.
+                # Filter Codeshares
                 unique_id = f"{airline_code}{flight_num}"
                 if unique_id in seen_flights: continue
                 seen_flights.add(unique_id)
 
-                # 3. Cargo Filter (Strict)
-                # Filter out known cargo IATA codes if they appear
-                if airline_code in ['FX', '5X', 'PO', 'K4', 'QY']: continue # FedEx, UPS, Polar, Kalitta, DHL
+                # Filter Cargo
+                if airline_code in ['FX', '5X', 'PO', 'K4', 'QY']: continue 
 
-                # 4. Timing Logic
-                # AirLabs returns 'dep_time' (Scheduled) and 'dep_estimated' (Live)
-                # Times are in "Airport Local Time" (Spokane Time)
+                # Time Logic
                 if mode == 'arrival':
                     time_str = f.get('arr_estimated') or f.get('arr_time')
                 else:
@@ -142,33 +126,26 @@ def fetch_flights(mode):
                 
                 if not time_str: continue
 
-                # Parse Format: "2025-12-07 14:30"
-                # Since API gives local time, we just attach the Timezone
+                # Parse Time
                 flight_dt_naive = datetime.strptime(time_str, '%Y-%m-%d %H:%M')
                 flight_local = TIMEZONE.localize(flight_dt_naive)
 
-                # 5. Time Window Filter
-                # Show flights from -20 mins ago up to +24 hours
+                # Filter Window (-20 mins to +24 hours)
                 if flight_local < now - timedelta(minutes=20): continue
                 if flight_local > now + timedelta(hours=24): continue
 
-                # 6. Zone/Terminal Logic
-                # API gives 'arr_terminal' or 'dep_terminal'
+                # Zone Logic
                 api_terminal = f.get('arr_terminal') if mode == 'arrival' else f.get('dep_terminal')
                 
-                zone = "Check Screen" # Fallback
-                
+                zone = "Check Screen"
                 if api_terminal:
-                    # If API says "C", we map it to Zone C
                     if 'C' in str(api_terminal): zone = "Zone C (North)"
                     elif 'A' in str(api_terminal) or 'B' in str(api_terminal): zone = "Zone A/B (Rotunda)"
                 else:
-                    # Fallback to Airline Map
                     zone = TERMINAL_MAP.get(airline_code, "Zone A/B (Default)")
 
-                # Status Check
                 status = f.get('status', '').lower()
-                if status == 'cancelled': continue # Skip cancelled flights
+                if status == 'cancelled': continue 
 
                 processed_flights.append({
                     'code': airline_code,
@@ -179,23 +156,20 @@ def fetch_flights(mode):
                     'status': status
                 })
             except Exception as e:
-                logger.error(f"Parse Error on flight: {e}")
+                logger.error(f"Parse Error: {e}")
                 continue
 
-        # Sort by time
         processed_flights.sort(key=lambda x: x['time'])
         
-        # Cache results
         flight_cache[mode]["data"] = processed_flights
         flight_cache[mode]["timestamp"] = current_time
         return processed_flights
 
     except Exception as e:
-        logger.error(f"Critical API Failure: {e}")
+        logger.error(f"API Failure: {e}")
         return []
 
 async def safe_edit(context, chat_id, msg_id, text):
-    """Safely edits message to avoid crashes."""
     try:
         await context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text, parse_mode='Markdown')
     except BadRequest:
@@ -220,7 +194,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         temp, weather = get_weather()
         flights = fetch_flights('arrival')
         
-        # Count flights landing in next 60 mins
         now = get_spokane_time()
         count = len([f for f in flights if now < f['time'] < now + timedelta(hours=1)])
         
@@ -228,7 +201,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if count >= 2: strategy = "🟡 **Head to Cell Phone Lot**"
         if count >= 4: strategy = "🟢 **GO TO AIRPORT NOW**"
         
-        # Weather Surge Logic
         if weather and ("Rain" in weather or "Snow" in weather):
             strategy += " (☔ Surge Likely)"
         
@@ -251,7 +223,6 @@ async def show_arrivals(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = "🛬 **INBOUND SCHEDULE (GEG)**\n"
     for f in flights[:15]:
-        # "True Pickup" = Land Time + 20 mins
         pickup = (f['time'] + timedelta(minutes=20)).strftime('%H:%M')
         text += f"`{f['time_str']}` {f['code']}{f['num']}\n📍 {f['zone']} | 🚕 *{pickup}*\n\n"
     
