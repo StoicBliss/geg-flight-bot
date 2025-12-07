@@ -3,7 +3,7 @@ import os
 import requests
 import threading
 import time
-import html  # <--- Added for proper HTML sanitization
+import html
 from flask import Flask 
 from datetime import datetime, timedelta
 import pytz
@@ -11,12 +11,12 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
 from telegram.error import BadRequest
 
-# --- WEB SERVER (KEEPS BOT ALIVE) --- #
+# --- WEB SERVER --- #
 app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "GEG Pro Bot (Final Stable) Online!"
+    return "GEG Pro Bot (Explanation Feature) Online!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
@@ -29,6 +29,14 @@ WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 
 AIRPORT_IATA = 'GEG'
 TIMEZONE = pytz.timezone('America/Los_Angeles')
+
+# --- EXPLANATION TEXT --- #
+CHECK_SCREEN_EXPLANATION = (
+    "\n\nℹ️ <b>So, what does Check Screen mean?</b>\n"
+    "These airlines often operate flights for several major carriers (like Delta, United, and Alaska). "
+    "Since the operator (SkyWest) doesn't have a dedicated terminal, the actual gate and zone "
+    "depend on the day's arrangement with the marketing partner."
+)
 
 # --- DATA MAPS --- #
 AIRLINE_NAMES = {
@@ -94,7 +102,6 @@ def fetch_flights(mode):
     params = {
         'api_key': AIRLABS_API_KEY,
         'arr_iata' if mode == 'arrival' else 'dep_iata': AIRPORT_IATA
-        # LIMIT REMOVED: Fetches max available for the day
     }
 
     try:
@@ -113,19 +120,14 @@ def fetch_flights(mode):
                 
                 if not code or not num: continue
 
-                # --- FILTERS ---
-                # 1. Skip Codeshares (Marketing duplicates)
                 if f.get('cs_flight_number'): continue
                 
-                # 2. Skip Exact Duplicates
                 uid = f"{code}{num}"
                 if uid in seen_flights: continue
                 seen_flights.add(uid)
 
-                # 3. Skip Cargo
                 if code in ['FX', '5X', 'PO', 'K4', 'QY', 'ABX', 'ATI']: continue 
 
-                # --- TIMING ---
                 sched_str = f.get('arr_time') if mode == 'arrival' else f.get('dep_time')
                 est_str = f.get('arr_estimated') if mode == 'arrival' else f.get('dep_estimated')
                 
@@ -144,7 +146,6 @@ def fetch_flights(mode):
 
                 delay_mins = int((final_local - sched_local).total_seconds() / 60)
                 
-                # --- STATUS ---
                 api_status = f.get('status', '').lower()
                 status_display = ""
                 
@@ -153,7 +154,6 @@ def fetch_flights(mode):
                 elif delay_mins > 15:
                     status_display = f"⚠️ Delayed {delay_mins}m"
                 
-                # --- ZONE ---
                 api_term = f.get('arr_terminal') if mode == 'arrival' else f.get('dep_terminal')
                 zone = "Check Screen"
                 if api_term:
@@ -225,7 +225,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🛬 Inbound (1hr): {count} planes\n"
                 f"🚦 {strategy}")
 
-        # Corrected Google Maps Link for precise navigation
         map_url = "https://www.google.com/maps/search/?api=1&query=Spokane+International+Airport+Cell+Phone+Waiting+Lot"
         keyboard = [[InlineKeyboardButton("🗺️ Nav to Waiting Lot", url=map_url)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -245,15 +244,22 @@ async def show_arrivals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🛬 <b>ARRIVALS</b>\nTime | Airline | Flight | Pickup | Zone\n"
     text += "-----------------------------------------\n"
     
+    has_check_screen = False
     for f in flights[:15]:
         pickup = (f['time'] + timedelta(minutes=20)).strftime('%H:%M')
         status_icon = "⚠️ " if "Delayed" in f['status'] else ("🔴 " if "CANCELLED" in f['status'] else "")
-        
-        # Proper HTML Escaping
         airline_safe = html.escape(f['airline'])
+        
+        # Check if we need to show the explanation footer
+        if "Check Screen" in f['zone']:
+            has_check_screen = True
         
         line = f"{status_icon}{f['time_str']} | {airline_safe} | {f['code']}{f['num']} | {pickup} | {f['zone']}\n"
         text += line
+    
+    # Append explanation if needed
+    if has_check_screen:
+        text += CHECK_SCREEN_EXPLANATION
     
     await safe_edit(context, update.effective_chat.id, msg.message_id, text)
 
@@ -268,12 +274,20 @@ async def show_departures(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🛫 <b>DEPARTURES</b>\nTime | Airline | Flight | Zone\n"
     text += "-----------------------------------------\n"
     
+    has_check_screen = False
     for f in flights[:15]:
         status_icon = "⚠️ " if "Delayed" in f['status'] else ("🔴 " if "CANCELLED" in f['status'] else "")
         airline_safe = html.escape(f['airline'])
         
-        line = f"{status_icon}{f['time_str']} | {airline_safe} | {f['code']}{f['num']} | {f['zone']}\n"
+        if "Check Screen" in f['zone']:
+            has_check_screen = True
+
+        line = (f"{status_icon}{f['time_str']} | {airline_safe} | "
+                f"{f['code']}{f['num']} | {f['zone']}\n")
         text += line
+    
+    if has_check_screen:
+        text += CHECK_SCREEN_EXPLANATION
     
     await safe_edit(context, update.effective_chat.id, msg.message_id, text)
 
@@ -283,7 +297,6 @@ async def show_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dep = fetch_flights('departure')
     
     problems = []
-    # Use .copy() to prevent cache mutation bugs
     for f in arr:
         if f['is_problem']: 
             p = f.copy()
