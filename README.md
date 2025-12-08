@@ -131,7 +131,9 @@ requests
 flask
 pytz
 
-ℹ️ Notes on "Check Screen"
+## ℹ️ Notes on "Check Screen"
 If the bot displays "Zone: Check Screen", it means the flight is operated by a regional partner (like SkyWest) or the API data didn't specify a terminal. These flights often shift between gates, so the driver should check physical airport screens.
+---
 
-Disclaimer: This tool is for informational purposes only. Always obey airport traffic laws and regulations.
+## ℹ️ Disclaimer: This tool is for informational purposes only. Always obey airport traffic laws and regulations.
+---
