@@ -3,7 +3,7 @@ import os
 import requests
 import threading
 import time
-import html
+import html  # Essential for sanitizing text
 from flask import Flask 
 from datetime import datetime, timedelta
 import pytz
@@ -16,7 +16,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "GEG Flight Tracker (QA Certified Gold)!"
+    return "GEG Pro Bot (QA Certified) Online!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
@@ -102,6 +102,7 @@ def fetch_flights(mode):
     params = {
         'api_key': AIRLABS_API_KEY,
         'arr_iata' if mode == 'arrival' else 'dep_iata': AIRPORT_IATA
+        # LIMIT REMOVED per QA to capture full day
     }
 
     try:
@@ -207,6 +208,11 @@ async def safe_edit(context, chat_id, msg_id, text, reply_markup=None):
 # --- BOT COMMANDS --- #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1. Get User's First Name
+    user = update.effective_user
+    name = user.first_name if user else "Driver" # Fallback just in case
+
+    # 2. Time-based Greeting Logic
     now = get_spokane_time()
     hour = now.hour
     
@@ -217,9 +223,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         greeting = "Good evening"
 
+    # 3. Personalized Message
     message = (
-        f"👋 <b>{greeting}, Driver.</b>\n\n"
-        "Welcome to the <b>GEG Flight Tracker</b>. "
+        f"👋 <b>{greeting}, {name}.</b>\n\n"
+        "Welcome to the <b>GEG Flight Tracker Bot</b>. "
         "I am here to help you track passenger demand and maximize your earnings.\n\n"
         "<b>📋 Dashboard Commands</b>\n"
         "/status - Check current demand strategy & weather.\n"
@@ -234,7 +241,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("📡 Analyzing...")
     try:
         temp, weather = get_weather()
-        # QA FIX: Handle NoneType for weather safely
+        # QA FIX: Sanitize weather string to prevent HTML crash
         weather_safe = html.escape(str(weather)) if weather else "Unavailable"
         
         flights = fetch_flights('arrival')
@@ -253,7 +260,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🛬 Inbound (1hr): {count} planes\n"
                 f"🚦 {strategy}")
 
-        # QA FIX: Working Google Maps Query
+        # QA FIX: Correct Google Maps Universal Link
         map_url = "https://www.google.com/maps/search/?api=1&query=Spokane+International+Airport+Cell+Phone+Waiting+Lot"
         keyboard = [[InlineKeyboardButton("🗺️ Nav to Waiting Lot", url=map_url)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -324,7 +331,7 @@ async def show_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dep = fetch_flights('departure')
     
     problems = []
-    # Use .copy() to avoid cache mutation
+    # Use .copy() to avoid cache corruption
     for f in arr:
         if f['is_problem']: 
             p = f.copy()
