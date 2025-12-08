@@ -16,7 +16,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "GEG Pro Bot (Gold Master) Online!"
+    return "GEG Flight Tracker"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
@@ -225,7 +225,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3. Clean Dashboard (Commands not code-blocked)
     message = (
         f"👋 <b>{greeting}, {name}.</b>\n\n"
-        "Welcome to the <b>GEG Airport Pro Assistant</b>. "
+        "Welcome to the <b>GEG Flight Tracker</b>. "
         "I am here to help you track passenger demand and maximize your earnings.\n\n"
         "<b>📋 Dashboard Commands</b>\n"
         "/status - Check current demand strategy & weather.\n"
