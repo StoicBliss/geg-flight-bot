@@ -16,7 +16,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "GEG Pro Bot (QA Certified Gold) Online!"
+    return "GEG Flight Tracker (QA Certified Gold)!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
