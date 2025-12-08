@@ -10,7 +10,7 @@ This tool helps drivers maximize earnings by predicting peak demand times, visua
 
 ### 🚦 Intelligent Demand Strategy
 * **Surge Score:** Analyzes incoming flight volume for the next hour to recommend a strategy (`Stay Downtown`, `Head to Cell Lot`, or `GO NOW`).
-* **Weather Integration:** factors in rain/snow data from OpenWeatherMap to predict demand surges.
+* **Weather Integration:** Factors in rain/snow data from OpenWeatherMap to predict demand surges.
 * **Navigation:** Includes a one-tap button to navigate directly to the **GEG Cell Phone Waiting Lot**.
 
 ### ✈️ Real-Time Flight Boards
@@ -123,3 +123,15 @@ geg-driver-bot/
 ├── bot.py              # Main bot logic, API fetching, and Flask server
 ├── requirements.txt    # Python dependencies
 └── README.md           # Documentation
+requirements.txt content:
+Plaintext
+
+python-telegram-bot
+requests
+flask
+pytz
+
+ℹ️ Notes on "Check Screen"
+If the bot displays "Zone: Check Screen", it means the flight is operated by a regional partner (like SkyWest) or the API data didn't specify a terminal. These flights often shift between gates, so the driver should check physical airport screens.
+
+Disclaimer: This tool is for informational purposes only. Always obey airport traffic laws and regulations.
